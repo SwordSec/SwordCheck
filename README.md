@@ -16,6 +16,8 @@ cargo run -- --min-score 80 -q    # CI: puan 80'in altındaysa çıkış kodu 1
 cargo run -- --fix --dry-run      # düzeltme komutlarını önizle
 cargo run -- --npm                # zararlı npm paketi taraması (genel + projeler)
 cargo run -- --npm --online       # ek olarak OSV.dev zararlı paket veritabanına sor
+cargo run -- --secrets            # .env ve yapılandırma dosyalarında API anahtarı ara
+cargo run -- --secrets --secrets-path ~/proje   # yalnızca bir dizini / dosyayı tara
 cargo run -- --help
 ```
 
@@ -59,6 +61,32 @@ Testler: `cargo test`
 | 0 | Başarısız kontrol yok ve puan eşiğin üzerinde |
 | 1 | En az bir kontrol başarısız ya da puan `--min-score` altında |
 | 2 | Kullanım ya da yapılandırma hatası |
+
+## Secret taraması (`--secrets`)
+
+Bu makinede hangi API anahtarının hangi dosyada durduğunu özetler. Salt
+okunurdur ve ağa çıkmaz.
+
+- **Bakılan yerler:** ev dizini altındaki projelerde `.env*`, `*.env`,
+  `*.tfstate`, `*.tfvars`, `*.pem`, `*.key`, `credentials.json`, `secrets.*`,
+  `.mcp.json`, `.git/config`; ayrıca `~/.aws/credentials`, `~/.npmrc`,
+  `~/.netrc`, `~/.docker/config.json`, `~/.kube/config`, kabuk geçmişi ve rc
+  dosyaları, `~/.ssh`, Claude / Cursor / VS Code ayarları.
+- **Atlananlar:** `node_modules`, `target`, `vendor`, `testdata` gibi bağımlılık
+  ve derleme dizinleri, gizli dizinler, `~/Library`, `~/go/pkg`.
+- **Kalıplar:** Anthropic, OpenAI, OpenRouter, AWS, Google, DigitalOcean,
+  GitHub, GitLab, Slack, Stripe, SendGrid, Twilio, npm, Hugging Face, Groq,
+  Telegram, JWT, URL içindeki parolalar, parolasız özel anahtarlar. Bunlara ek
+  olarak adı `SECRET` / `TOKEN` / `PASSWORD` / `API_KEY` içeren ve değeri
+  rastgele görünen atamalar "Genel" başlığında raporlanır (sezgisel).
+- **Şablon dosyalar** (`.env.example` vb.): yalnızca gerçek anahtar kalıpları
+  aranır; uydurma parolalar raporlanmaz.
+- **Maskeleme:** ham değer hiçbir çıktıya yazılmaz. Aynı anahtarın farklı
+  dosyalardaki kopyaları `secret_id` ile eşleştirilir.
+- **İşaretler:** dosya git'te izleniyorsa `GIT'TE İZLENİYOR`, grup / diğer
+  kullanıcılar okuyabiliyorsa `izin 644`.
+- **Çıkış kodu:** git'te izlenen bir dosyada anahtar varsa 1, yoksa 0.
+- Yalnızca `text` ve `json` biçimleri desteklenir.
 
 ## Çıktı biçimleri
 

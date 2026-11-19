@@ -11,6 +11,7 @@
 //! - `history` : önceki çalıştırmalarla karşılaştırma
 //! - `report`  : metin / JSON / Markdown / HTML çıktısı
 //! - `npm`     : zararlı npm paketi taraması (`--npm`)
+//! - `secrets` : API anahtarı / secret taraması (`--secrets`)
 //! - `fix`     : onaylı düzeltme modu
 //! - `tui`     : etkileşimli pano
 
@@ -22,6 +23,7 @@ mod npm;
 mod report;
 mod runner;
 mod score;
+mod secrets;
 mod tui;
 
 use checks::{Check, CheckResult};
@@ -124,6 +126,14 @@ struct Cli {
     #[arg(long, requires = "npm")]
     online: bool,
 
+    /// .env ve yapılandırma dosyalarında API anahtarı / secret ara
+    #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history", "npm"])]
+    secrets: bool,
+
+    /// --secrets ile: yalnızca bu dizini ya da dosyayı tara (yinelenebilir)
+    #[arg(long, value_name = "YOL", requires = "secrets")]
+    secrets_path: Vec<PathBuf>,
+
     /// Yardımı göster
     #[arg(short = 'h', long, action = ArgAction::Help)]
     help: Option<bool>,
@@ -187,6 +197,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
     if cli.npm {
         return run_npm(&cli);
+    }
+    if cli.secrets {
+        return run_secrets(&cli);
     }
 
     let runner = SystemRunner::new();
@@ -320,6 +333,56 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     }
 
     Ok(if found_malware { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+/// `--secrets`: anahtar barındırabilecek dosyaları tarar. Çıkış kodu, git'te
+/// izlenen bir dosyada anahtar bulunduysa 1'dir; `.env` içindeki olağan
+/// anahtarlar kodu etkilemez.
+fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
+    let format = if cli.json { Format::Json } else { cli.format };
+    if !matches!(format, Format::Text | Format::Json) {
+        return Err("--secrets yalnızca text ve json biçimlerini destekler.".to_string());
+    }
+
+    let files = if cli.secrets_path.is_empty() {
+        secrets::default_files()
+    } else {
+        let mut files = Vec::new();
+        for path in &cli.secrets_path {
+            if !path.exists() {
+                return Err(format!("{} bulunamadı.", path.display()));
+            }
+            files.extend(secrets::files_under(path));
+        }
+        files
+    };
+
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let report = secrets::SecretsReport::new(timestamp, secrets::scan(&files));
+    let exposed = report.scan.tracked().next().is_some();
+
+    let rendered = match format {
+        Format::Json => report.to_json(),
+        _ if cli.quiet => format!(
+            "{} anahtar, {} konum, {} git'te izleniyor",
+            report.scan.unique_secrets(),
+            report.scan.findings.len(),
+            report.scan.tracked().count()
+        ),
+        _ => report.to_text(),
+    };
+    match &cli.output {
+        Some(path) => {
+            std::fs::write(path, format!("{rendered}\n"))
+                .map_err(|err| format!("{} yazılamadı: {err}", path.display()))?;
+            if !cli.quiet {
+                eprintln!("Rapor yazıldı: {}", path.display());
+            }
+        }
+        None => println!("{rendered}"),
+    }
+
+    Ok(if exposed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 /// Betiklerde ve CI'da kullanılmak üzere çıkış kodunu belirler.
@@ -457,6 +520,9 @@ mod tests {
         assert!(parse(&["--npm-path", "."]).is_err());
         assert!(parse(&["--npm", "--fix"]).is_err());
         assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());
+        assert!(parse(&["--secrets-path", "."]).is_err(), "--secrets-path yalnızca --secrets ile");
+        assert!(parse(&["--secrets", "--npm"]).is_err());
+        assert!(parse(&["--secrets", "--json", "--secrets-path", "a"]).is_ok());
     }
 
     #[test]
