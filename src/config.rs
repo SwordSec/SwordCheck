@@ -1,6 +1,6 @@
-//! `audit.toml` yapılandırma dosyası.
+//! The `audit.toml` configuration file.
 //!
-//! Örnek:
+//! Example:
 //!
 //! ```toml
 //! min_score = 80
@@ -10,35 +10,35 @@
 //! filevault = 40
 //!
 //! [exceptions]
-//! ssh = "Geliştirme sunucusu, SSH bilerek açık"
+//! ssh = "Development server, SSH is enabled on purpose"
 //! ```
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Yapılandırma. Tüm alanlar isteğe bağlıdır (`#[serde(default)]`);
-/// `deny_unknown_fields` yazım hatalarını sessizce yutmak yerine bildirir.
+/// The configuration. All fields are optional (`#[serde(default)]`);
+/// `deny_unknown_fields` reports typos instead of silently swallowing them.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Puan bu değerin altındaysa çıkış kodu 1 olur.
+    /// If the score is below this value, the exit code is 1.
     pub min_score: Option<u32>,
-    /// Hiç çalıştırılmayacak kontrollerin kimlikleri.
+    /// Ids of checks that are never run.
     pub skip: Vec<String>,
-    /// Kontrol kimliği → puandaki ağırlık.
+    /// Check id → weight in the score.
     pub weights: HashMap<String, u32>,
-    /// Kontrol kimliği → istisna gerekçesi. İstisnalı kontrol çalışır ve
-    /// gösterilir ama puana ve çıkış koduna etki etmez.
+    /// Check id → exception reason. An exempted check still runs and is
+    /// shown, but does not affect the score or the exit code.
     pub exceptions: HashMap<String, String>,
 }
 
 impl Config {
-    /// Yapılandırmayı yükler.
+    /// Loads the configuration.
     ///
-    /// `explicit` verilmişse o dosya zorunludur. Verilmemişse sırayla
-    /// `./audit.toml` ve `~/.config/macos-audit/audit.toml` denenir; hiçbiri
-    /// yoksa varsayılan (boş) yapılandırma döner.
+    /// If `explicit` is given, that file is required. Otherwise
+    /// `./audit.toml` and `~/.config/macos-audit/audit.toml` are tried in
+    /// order; if neither exists, the default (empty) configuration is returned.
     pub fn load(explicit: Option<&Path>) -> Result<Self, String> {
         let path = match explicit {
             Some(path) => Some(path.to_path_buf()),
@@ -48,23 +48,23 @@ impl Config {
         match path {
             Some(path) => {
                 let text = std::fs::read_to_string(&path)
-                    .map_err(|err| format!("{} okunamadı: {err}", path.display()))?;
+                    .map_err(|err| format!("could not read {}: {err}", path.display()))?;
                 Self::parse(&text).map_err(|err| format!("{}: {err}", path.display()))
             }
             None => Ok(Self::default()),
         }
     }
 
-    /// TOML metnini ayrıştırır.
+    /// Parses TOML text.
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Config = toml::from_str(text).map_err(|err| err.to_string())?;
         if config.min_score.is_some_and(|score| score > 100) {
-            return Err("min_score 0 ile 100 arasında olmalı".to_string());
+            return Err("min_score must be between 0 and 100".to_string());
         }
         Ok(config)
     }
 
-    /// Yapılandırmada geçen tüm kontrol kimlikleri (doğrulama için).
+    /// All check ids mentioned in the configuration (for validation).
     pub fn referenced_ids(&self) -> impl Iterator<Item = &str> {
         self.skip
             .iter()
@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tam_ornek_ayristirilir() {
+    fn full_example_parses() {
         let config = Config::parse(
             r#"
             min_score = 80
@@ -97,7 +97,7 @@ mod tests {
             filevault = 40
 
             [exceptions]
-            ssh = "bilerek açık"
+            ssh = "enabled on purpose"
             "#,
         )
         .unwrap();
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(config.min_score, Some(80));
         assert_eq!(config.skip, ["airdrop"]);
         assert_eq!(config.weights["filevault"], 40);
-        assert_eq!(config.exceptions["ssh"], "bilerek açık");
+        assert_eq!(config.exceptions["ssh"], "enabled on purpose");
 
         let mut ids: Vec<&str> = config.referenced_ids().collect();
         ids.sort_unstable();
@@ -113,14 +113,14 @@ mod tests {
     }
 
     #[test]
-    fn bos_dosya_varsayilan_verir() {
+    fn empty_file_yields_defaults() {
         let config = Config::parse("").unwrap();
         assert!(config.min_score.is_none());
         assert!(config.skip.is_empty());
     }
 
     #[test]
-    fn bilinmeyen_alan_ve_gecersiz_puan_reddedilir() {
+    fn unknown_field_and_invalid_score_are_rejected() {
         assert!(Config::parse("minscore = 80").is_err());
         assert!(Config::parse("min_score = 150").is_err());
     }

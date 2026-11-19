@@ -1,19 +1,20 @@
-//! macOS Güvenlik Denetçisi
+//! macOS Security Auditor
 //!
-//! Yerel macOS güvenlik ayarlarını salt okunur şekilde denetler, puanlar ve
-//! raporlar. Rust öğrenme projesi olarak her bölüm ayrıntılı yorumlanmıştır.
+//! Audits local macOS security settings in a read-only way, scores them and
+//! reports the result. As a Rust learning project, every section is commented
+//! in detail.
 //!
-//! Modüller:
-//! - `checks`  : `Check` trait'i ve tüm kontroller
-//! - `runner`  : dış komut çalıştırma katmanı (testlerde sahtesi kullanılır)
-//! - `config`  : `audit.toml` yapılandırması
-//! - `score`   : puan ve not hesabı
-//! - `history` : önceki çalıştırmalarla karşılaştırma
-//! - `report`  : metin / JSON / Markdown / HTML çıktısı
-//! - `npm`     : zararlı npm paketi taraması (`--npm`)
-//! - `secrets` : API anahtarı / secret taraması (`--secrets`)
-//! - `fix`     : onaylı düzeltme modu
-//! - `tui`     : etkileşimli pano
+//! Modules:
+//! - `checks`  : the `Check` trait and all checks
+//! - `runner`  : the layer that runs external commands (tests use a fake one)
+//! - `config`  : the `audit.toml` configuration
+//! - `score`   : score and grade calculation
+//! - `history` : comparison with previous runs
+//! - `report`  : text / JSON / Markdown / HTML output
+//! - `npm`     : malicious npm package scan (`--npm`)
+//! - `secrets` : API key / secret scan (`--secrets`)
+//! - `fix`     : fix mode with confirmation
+//! - `tui`     : interactive dashboard
 
 mod checks;
 mod config;
@@ -36,136 +37,136 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Komut satırı argümanları. `clap`, bu yapıdaki alanlardan ve doc
-/// yorumlarından ayrıştırıcıyı ve `--help` çıktısını üretir.
+/// Command-line arguments. `clap` generates the parser and the `--help`
+/// output from the fields and doc comments of this struct.
 #[derive(Debug, Parser)]
 #[command(
     name = "macos-audit",
     version,
-    about = "Yerel macOS güvenlik ayarlarını salt okunur denetler ve 100 üzerinden puanlar.",
+    about = "Audits local macOS security settings read-only and scores them out of 100.",
     disable_help_flag = true,
     disable_version_flag = true,
-    override_usage = "macos-audit [SEÇENEKLER]",
-    help_template = "{name} {version}\n{about}\n\nKullanım: {usage}\n\nSeçenekler:\n{options}\n{after-help}",
-    after_help = "Çıkış kodu:\n  0  başarısız kontrol yok ve puan eşiğin üzerinde\n  1  en az bir kontrol başarısız ya da puan --min-score altında\n  2  kullanım ya da yapılandırma hatası\n\nYapılandırma: ./audit.toml ya da ~/.config/macos-audit/audit.toml"
+    override_usage = "macos-audit [OPTIONS]",
+    help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n\nConfiguration: ./audit.toml or ~/.config/macos-audit/audit.toml"
 )]
 struct Cli {
-    /// Çıktı biçimi
-    #[arg(long, value_enum, default_value_t = Format::Text, value_name = "BİÇİM")]
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
     format: Format,
 
-    /// `--format json` kısayolu
+    /// Shortcut for `--format json`
     #[arg(long, conflicts_with = "format")]
     json: bool,
 
-    /// Raporu terminal yerine dosyaya yaz
-    #[arg(short, long, value_name = "DOSYA")]
+    /// Write the report to a file instead of the terminal
+    #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Yalnızca bu kontrolleri çalıştır (virgülle ayrılmış kimlikler)
-    #[arg(long, value_delimiter = ',', value_name = "KİMLİKLER")]
+    /// Run only these checks (comma-separated ids)
+    #[arg(long, value_delimiter = ',', value_name = "IDS")]
     only: Vec<String>,
 
-    /// Bu kontrolleri atla (virgülle ayrılmış kimlikler)
-    #[arg(long, value_delimiter = ',', value_name = "KİMLİKLER")]
+    /// Skip these checks (comma-separated ids)
+    #[arg(long, value_delimiter = ',', value_name = "IDS")]
     skip: Vec<String>,
 
-    /// Puan bu değerin altındaysa çıkış kodu 1 olsun (CI için)
-    #[arg(long, value_name = "PUAN", value_parser = clap::value_parser!(u32).range(0..=100))]
+    /// Exit with code 1 if the score is below this value (for CI)
+    #[arg(long, value_name = "SCORE", value_parser = clap::value_parser!(u32).range(0..=100))]
     min_score: Option<u32>,
 
-    /// Yalnızca puanı yazdır
+    /// Print only the score
     #[arg(short, long)]
     quiet: bool,
 
-    /// Renkli çıktıyı kapat
+    /// Disable colored output
     #[arg(long)]
     no_color: bool,
 
-    /// Yapılandırma dosyası yolu
-    #[arg(long, value_name = "DOSYA")]
+    /// Path to the configuration file
+    #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Kontrolleri kimlik, ağırlık ve CIS bölümleriyle listele
+    /// List the checks with their ids, weights and CIS sections
     #[arg(long)]
     list: bool,
 
-    /// Geçmiş denetimleri listele
+    /// List past audits
     #[arg(long)]
     history: bool,
 
-    /// Bu çalıştırmayı geçmişe kaydetme ve karşılaştırma yapma
+    /// Do not save this run to the history and do not compare against it
     #[arg(long)]
     no_history: bool,
 
-    /// Düzeltilebilir sorunlar için komutu göster ve onayla uygula
+    /// Show the command for fixable issues and apply it after confirmation
     #[arg(long, conflicts_with_all = ["json", "output", "tui", "quiet"])]
     fix: bool,
 
-    /// --fix ile: komutları yalnızca göster, çalıştırma
+    /// With --fix: only show the commands, do not run them
     #[arg(long, requires = "fix")]
     dry_run: bool,
 
-    /// --fix ile: onay sormadan uygula
+    /// With --fix: apply without asking for confirmation
     #[arg(short = 'y', long, requires = "fix")]
     yes: bool,
 
-    /// Etkileşimli panoyu aç
+    /// Open the interactive dashboard
     #[arg(long, conflicts_with_all = ["json", "output", "quiet"])]
     tui: bool,
 
-    /// Tüm npm paketlerini (genel + projeler) zararlı yazılıma karşı tara
+    /// Scan all npm packages (global + projects) for malware
     #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history"])]
     npm: bool,
 
-    /// --npm ile: yalnızca bu dizini tara (yinelenebilir)
-    #[arg(long, value_name = "DİZİN", requires = "npm")]
+    /// With --npm: scan only this directory (repeatable)
+    #[arg(long, value_name = "DIR", requires = "npm")]
     npm_path: Vec<PathBuf>,
 
-    /// --npm ile: paket ad ve sürümlerini OSV.dev zararlı paket veritabanına sor
+    /// With --npm: look up package names and versions in the OSV.dev malicious package database
     #[arg(long, requires = "npm")]
     online: bool,
 
-    /// .env ve yapılandırma dosyalarında API anahtarı / secret ara
+    /// Search .env and configuration files for API keys / secrets
     #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history", "npm"])]
     secrets: bool,
 
-    /// --secrets ile: yalnızca bu dizini ya da dosyayı tara (yinelenebilir)
-    #[arg(long, value_name = "YOL", requires = "secrets")]
+    /// With --secrets: scan only this directory or file (repeatable)
+    #[arg(long, value_name = "PATH", requires = "secrets")]
     secrets_path: Vec<PathBuf>,
 
-    /// Yardımı göster
+    /// Show help
     #[arg(short = 'h', long, action = ArgAction::Help)]
     help: Option<bool>,
 
-    /// Sürümü göster
+    /// Show version
     #[arg(short = 'V', long, action = ArgAction::Version)]
     version: Option<bool>,
 }
 
 fn main() -> ExitCode {
-    // Hatalı argümanlarda clap kendi mesajını yazdırıp 2 koduyla çıkar.
+    // On invalid arguments clap prints its own message and exits with code 2.
     let cli = Cli::parse();
 
-    // `run` içindeki `?` ile iletilen tüm hatalar burada tek yerde ele alınır.
+    // All errors propagated with `?` inside `run` are handled here in one place.
     match run(cli) {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("{} {message}", "Hata:".red().bold());
+            eprintln!("{} {message}", "Error:".red().bold());
             ExitCode::from(2)
         }
     }
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
-    // Çıktı terminale gitmiyorsa (dosya, boru) renk kodları anlamsızdır.
+    // Color codes are meaningless if the output is not going to a terminal (file, pipe).
     if cli.no_color || cli.output.is_some() || !std::io::stdout().is_terminal() {
         colored::control::set_override(false);
     }
 
-    // Kullanılan komutlar macOS'a özgü. `cfg!` derleme zamanında true/false üretir.
+    // The commands used are macOS-specific. `cfg!` yields true/false at compile time.
     if !cfg!(target_os = "macos") {
-        return Err("Bu araç yalnızca macOS üzerinde çalışır.".to_string());
+        return Err("This tool only runs on macOS.".to_string());
     }
 
     let config = Config::load(cli.config.as_deref())?;
@@ -179,12 +180,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
     let history_path = history::history_path();
     if cli.history {
-        let path = history_path.ok_or("Geçmiş dizini belirlenemedi (HOME tanımsız).")?;
+        let path = history_path.ok_or("Could not determine the history directory (HOME is not set).")?;
         print_history(&history::load(&path)?);
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Çalıştırılacak kontrolleri seç: --only, --skip ve yapılandırmadaki skip.
+    // Select the checks to run: --only, --skip and the skip list in the configuration.
     checks.retain(|check| {
         let id = check.id();
         let wanted = cli.only.is_empty() || cli.only.iter().any(|only| only == id);
@@ -192,7 +193,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         wanted && !skipped
     });
     if checks.is_empty() {
-        return Err("Çalıştırılacak kontrol kalmadı (--only / --skip seçimlerini gözden geçir).".to_string());
+        return Err("No checks left to run (review your --only / --skip selections).".to_string());
     }
 
     if cli.npm {
@@ -208,15 +209,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
     if cli.tui {
         if !std::io::stdout().is_terminal() {
-            return Err("--tui etkileşimli bir terminal gerektirir.".to_string());
+            return Err("--tui requires an interactive terminal.".to_string());
         }
         tui::run(&checks, &config, os_version, results)
-            .map_err(|err| format!("Pano çalıştırılamadı: {err}"))?;
+            .map_err(|err| format!("Could not run the dashboard: {err}"))?;
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Kısmi çalıştırmalar (--only/--skip) geçmişe yazılmaz: puanları tam
-    // denetimle karşılaştırılamaz.
+    // Partial runs (--only/--skip) are not written to the history: their
+    // scores cannot be compared with a full audit.
     let use_history = !cli.no_history && cli.only.is_empty() && cli.skip.is_empty();
     let mut records = Vec::new();
     let mut history_file = None;
@@ -226,8 +227,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 records = loaded;
                 history_file = Some(path);
             }
-            // Bozuk geçmiş denetimi engellemesin; uyarıp geçmişsiz devam et.
-            Err(err) => eprintln!("{} geçmiş kullanılamıyor: {err}", "Uyarı:".yellow()),
+            // A corrupt history must not block the audit; warn and continue without it.
+            Err(err) => eprintln!("{} history unavailable: {err}", "Warning:".yellow()),
         }
     }
 
@@ -239,9 +240,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     match &cli.output {
         Some(path) => {
             std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("{} yazılamadı: {err}", path.display()))?;
+                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
             if !cli.quiet {
-                eprintln!("Rapor yazıldı: {}", path.display());
+                eprintln!("Report written: {}", path.display());
             }
         }
         None => println!("{rendered}"),
@@ -254,31 +255,32 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         };
         let summary = fix::run_fixes(&report.checks, &checks, &config, &options);
 
-        // Bir şey değiştiyse tüm denetimi yeniden çalıştırıp yeni puanı göster.
+        // If anything changed, re-run the whole audit and show the new score.
         if summary.applied > 0 {
             let before = report.score;
             let results = checks::run_checks(&checks, &SystemRunner::new(), &config);
             report = Report::new(timestamp.clone(), os_version.clone(), results, records.last());
-            println!("Puan: {before} → {}", report.score.to_string().bold());
+            println!("Score: {before} → {}", report.score.to_string().bold());
         }
     }
 
     if let Some(path) = history_file {
         let record = history::RunRecord::new(timestamp, os_version, report.score, &report.checks);
         if let Err(err) = history::append(&path, records, record) {
-            eprintln!("{} geçmiş kaydedilemedi: {err}", "Uyarı:".yellow());
+            eprintln!("{} could not save history: {err}", "Warning:".yellow());
         }
     }
 
     Ok(exit_code(&cli, &config, &report))
 }
 
-/// `--npm`: kurulu npm paketlerini ayrıntılı tarar. Çıkış kodu, kesin bir
-/// zararlı paket bulunduysa 1'dir; sezgisel betik uyarıları kodu etkilemez.
+/// `--npm`: scans installed npm packages in detail. The exit code is 1 if a
+/// confirmed malicious package was found; heuristic script warnings do not
+/// affect the code.
 fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let format = if cli.json { Format::Json } else { cli.format };
     if !matches!(format, Format::Text | Format::Json) {
-        return Err("--npm yalnızca text ve json biçimlerini destekler.".to_string());
+        return Err("--npm only supports the text and json formats.".to_string());
     }
 
     let roots = if cli.npm_path.is_empty() {
@@ -287,7 +289,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
         let mut roots = Vec::new();
         for path in &cli.npm_path {
             if !path.is_dir() {
-                return Err(format!("{} bir dizin değil.", path.display()));
+                return Err(format!("{} is not a directory.", path.display()));
             }
             roots.extend(npm::roots_under(path));
         }
@@ -296,7 +298,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
 
     let mut scan = npm::scan(&roots);
 
-    // OSV'ye ulaşılamazsa yerel sonuçlar yine de gösterilir.
+    // If OSV cannot be reached, the local results are still shown.
     let mut online = false;
     if cli.online {
         match npm::osv_lookup(&scan.installed) {
@@ -304,7 +306,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
                 scan.add_osv(hits);
                 online = true;
             }
-            Err(err) => eprintln!("{} OSV sorgusu yapılamadı: {err}", "Uyarı:".yellow()),
+            Err(err) => eprintln!("{} OSV query failed: {err}", "Warning:".yellow()),
         }
     }
 
@@ -315,7 +317,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let rendered = match format {
         Format::Json => report.to_json(),
         _ if cli.quiet => format!(
-            "{} zararlı, {} şüpheli",
+            "{} malicious, {} suspicious",
             report.scan.malware().count(),
             report.scan.suspicious().count()
         ),
@@ -324,9 +326,9 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     match &cli.output {
         Some(path) => {
             std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("{} yazılamadı: {err}", path.display()))?;
+                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
             if !cli.quiet {
-                eprintln!("Rapor yazıldı: {}", path.display());
+                eprintln!("Report written: {}", path.display());
             }
         }
         None => println!("{rendered}"),
@@ -335,13 +337,13 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     Ok(if found_malware { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-/// `--secrets`: anahtar barındırabilecek dosyaları tarar. Çıkış kodu, git'te
-/// izlenen bir dosyada anahtar bulunduysa 1'dir; `.env` içindeki olağan
-/// anahtarlar kodu etkilemez.
+/// `--secrets`: scans files that may hold secrets. The exit code is 1 if a
+/// secret was found in a file tracked in git; ordinary secrets inside `.env`
+/// do not affect the code.
 fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     let format = if cli.json { Format::Json } else { cli.format };
     if !matches!(format, Format::Text | Format::Json) {
-        return Err("--secrets yalnızca text ve json biçimlerini destekler.".to_string());
+        return Err("--secrets only supports the text and json formats.".to_string());
     }
 
     let files = if cli.secrets_path.is_empty() {
@@ -350,7 +352,7 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
         let mut files = Vec::new();
         for path in &cli.secrets_path {
             if !path.exists() {
-                return Err(format!("{} bulunamadı.", path.display()));
+                return Err(format!("{} not found.", path.display()));
             }
             files.extend(secrets::files_under(path));
         }
@@ -364,7 +366,7 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     let rendered = match format {
         Format::Json => report.to_json(),
         _ if cli.quiet => format!(
-            "{} anahtar, {} konum, {} git'te izleniyor",
+            "{} secrets, {} locations, {} tracked in git",
             report.scan.unique_secrets(),
             report.scan.findings.len(),
             report.scan.tracked().count()
@@ -374,9 +376,9 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     match &cli.output {
         Some(path) => {
             std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("{} yazılamadı: {err}", path.display()))?;
+                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
             if !cli.quiet {
-                eprintln!("Rapor yazıldı: {}", path.display());
+                eprintln!("Report written: {}", path.display());
             }
         }
         None => println!("{rendered}"),
@@ -385,16 +387,16 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     Ok(if exposed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-/// Betiklerde ve CI'da kullanılmak üzere çıkış kodunu belirler.
+/// Determines the exit code, for use in scripts and CI.
 fn exit_code(cli: &Cli, config: &Config, report: &Report) -> ExitCode {
-    // Komut satırındaki eşik yapılandırmadakinin önüne geçer.
+    // The threshold on the command line takes precedence over the one in the configuration.
     let min_score = cli.min_score.or(config.min_score);
     let below_threshold = min_score.is_some_and(|min| report.score < min);
 
     if below_threshold && !cli.quiet {
         eprintln!(
-            "{} puan {} eşiğin ({}) altında.",
-            "Uyarı:".yellow(),
+            "{} score {} is below the threshold ({}).",
+            "Warning:".yellow(),
             report.score,
             min_score.unwrap_or_default()
         );
@@ -407,8 +409,8 @@ fn exit_code(cli: &Cli, config: &Config, report: &Report) -> ExitCode {
     }
 }
 
-/// Komut satırında ve yapılandırmada geçen kontrol kimliklerini doğrular;
-/// yazım hatası sessizce "hiçbir şey yapmama"ya dönüşmesin.
+/// Validates the check ids referenced on the command line and in the
+/// configuration, so that a typo does not silently turn into "do nothing".
 fn validate_ids(cli: &Cli, config: &Config, checks: &[Box<dyn Check>]) -> Result<(), String> {
     let known: Vec<&str> = checks.iter().map(|check| check.id()).collect();
     let referenced = cli
@@ -421,7 +423,7 @@ fn validate_ids(cli: &Cli, config: &Config, checks: &[Box<dyn Check>]) -> Result
     for id in referenced {
         if !known.contains(&id) {
             return Err(format!(
-                "Bilinmeyen kontrol kimliği: `{id}`. Geçerli kimlikler: {}",
+                "Unknown check id: `{id}`. Valid ids: {}",
                 known.join(", ")
             ));
         }
@@ -429,13 +431,13 @@ fn validate_ids(cli: &Cli, config: &Config, checks: &[Box<dyn Check>]) -> Result
     Ok(())
 }
 
-/// `--list`: tüm kontrolleri tablo halinde yazdırır.
+/// `--list`: prints all checks as a table.
 fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
     println!(
         "{}",
         format!(
             "{:<16} {:>7}  {:<8} {:<8} {:<9} {}",
-            "KİMLİK", "AĞIRLIK", "ÖNEM", "CIS", "DÜZELTME", "AD"
+            "ID", "WEIGHT", "SEVERITY", "CIS", "FIX", "NAME"
         )
         .bold()
     );
@@ -447,9 +449,9 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
             .unwrap_or_else(|| check.weight());
         let mut name = check.name().to_string();
         if config.skip.iter().any(|skip| skip == check.id()) {
-            name.push_str(" (atlanıyor)");
+            name.push_str(" (skipped)");
         } else if config.exceptions.contains_key(check.id()) {
-            name.push_str(" (istisna)");
+            name.push_str(" (exception)");
         }
         println!(
             "{:<16} {:>7}  {:<8} {:<8} {:<9} {}",
@@ -457,26 +459,26 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
             weight,
             check.severity().label(),
             check.cis().unwrap_or("–"),
-            if check.fix().is_some() { "var" } else { "elle" },
+            if check.fix().is_some() { "yes" } else { "manual" },
             name
         );
     }
 }
 
-/// `--history`: geçmiş denetimleri eskiden yeniye yazdırır.
+/// `--history`: prints past audits from oldest to newest.
 fn print_history(records: &[history::RunRecord]) {
     if records.is_empty() {
-        println!("Henüz kayıtlı denetim yok.");
+        println!("No audits recorded yet.");
         return;
     }
     println!(
         "{}",
-        format!("{:<17} {:>4}  {:<3} {:<14} {}", "TARİH", "PUAN", "NOT", "SİSTEM", "SORUNLAR").bold()
+        format!("{:<17} {:>5}  {:<5} {:<14} {}", "DATE", "SCORE", "GRADE", "SYSTEM", "ISSUES").bold()
     );
     for record in records {
         let count = |status| record.checks.values().filter(|s| **s == status).count();
         println!(
-            "{:<17} {:>4}  {:<3} {:<14} {} başarısız, {} uyarı",
+            "{:<17} {:>5}  {:<5} {:<14} {} failed, {} warned",
             report::short_time(&record.timestamp),
             record.score,
             score::grade(record.score),
@@ -497,36 +499,36 @@ mod tests {
     }
 
     #[test]
-    fn clap_tanimi_tutarli() {
-        // Çakışan kısa adlar, eksik `requires` hedefleri gibi hataları yakalar.
+    fn clap_definition_is_consistent() {
+        // Catches mistakes such as clashing short names or missing `requires` targets.
         Cli::command().debug_assert();
     }
 
     #[test]
-    fn virgullu_listeler_ayrilir() {
+    fn comma_separated_lists_are_split() {
         let cli = parse(&["--only", "filevault,sip", "--skip", "ssh"]).unwrap();
         assert_eq!(cli.only, ["filevault", "sip"]);
         assert_eq!(cli.skip, ["ssh"]);
     }
 
     #[test]
-    fn gecersiz_kombinasyonlar_reddedilir() {
-        assert!(parse(&["--dry-run"]).is_err(), "--dry-run tek başına olmaz");
+    fn invalid_combinations_are_rejected() {
+        assert!(parse(&["--dry-run"]).is_err(), "--dry-run is not allowed on its own");
         assert!(parse(&["--fix", "--json"]).is_err());
         assert!(parse(&["--min-score", "101"]).is_err());
-        assert!(parse(&["--bilinmeyen"]).is_err());
+        assert!(parse(&["--unknown"]).is_err());
         assert!(parse(&["--fix", "--dry-run"]).is_ok());
-        assert!(parse(&["--online"]).is_err(), "--online yalnızca --npm ile");
+        assert!(parse(&["--online"]).is_err(), "--online only with --npm");
         assert!(parse(&["--npm-path", "."]).is_err());
         assert!(parse(&["--npm", "--fix"]).is_err());
         assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());
-        assert!(parse(&["--secrets-path", "."]).is_err(), "--secrets-path yalnızca --secrets ile");
+        assert!(parse(&["--secrets-path", "."]).is_err(), "--secrets-path only with --secrets");
         assert!(parse(&["--secrets", "--npm"]).is_err());
         assert!(parse(&["--secrets", "--json", "--secrets-path", "a"]).is_ok());
     }
 
     #[test]
-    fn bilinmeyen_kimlik_hata_verir() {
+    fn unknown_id_is_an_error() {
         let checks = checks::registry();
         let config = Config::default();
 
@@ -537,7 +539,7 @@ mod tests {
         let cli = parse(&["--only", "filevault"]).unwrap();
         assert!(validate_ids(&cli, &config, &checks).is_ok());
 
-        let config = Config::parse("skip = [\"yok\"]").unwrap();
+        let config = Config::parse("skip = [\"missing\"]").unwrap();
         assert!(validate_ids(&parse(&[]).unwrap(), &config, &checks).is_err());
     }
 }

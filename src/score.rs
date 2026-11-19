@@ -1,13 +1,14 @@
-//! Puan ve not hesaplama.
+//! Score and grade calculation.
 
 use crate::checks::{CheckResult, Status};
 use serde::Serialize;
 
-/// Ağırlıklı puanı (0-100) hesaplar.
+/// Calculates the weighted score (0-100).
 ///
-/// Pass = tam puan, Warn = yarım puan, Fail = 0 puan.
-/// Unknown ve istisnalı kontroller paydaya dahil edilmez; böylece tespit
-/// edilemeyen ya da bilerek kabul edilen bir durum puanı düşürmez.
+/// Pass = full points, Warn = half points, Fail = 0 points.
+/// Unknown and exempted checks are left out of the denominator, so a state
+/// that could not be determined or was knowingly accepted does not lower the
+/// score.
 pub fn calculate_score(results: &[CheckResult]) -> u32 {
     let mut earned: u32 = 0;
     let mut possible: u32 = 0;
@@ -15,7 +16,7 @@ pub fn calculate_score(results: &[CheckResult]) -> u32 {
     for result in results.iter().filter(|result| result.exempt.is_none()) {
         match result.status {
             Status::Pass => {
-                // Yarım puanlar tam sayı kalsın diye her şeyi 2 ile çarpıyoruz.
+                // We multiply everything by 2 so half points stay integers.
                 earned += result.weight * 2;
                 possible += result.weight * 2;
             }
@@ -28,11 +29,11 @@ pub fn calculate_score(results: &[CheckResult]) -> u32 {
         }
     }
 
-    // `possible` sıfırsa `earned` de sıfırdır; max(1) sıfıra bölmeyi önler.
+    // If `possible` is zero, `earned` is zero too; max(1) prevents division by zero.
     earned * 100 / possible.max(1)
 }
 
-/// Puanın harf notu.
+/// The letter grade for a score.
 pub fn grade(score: u32) -> &'static str {
     match score {
         90.. => "A",
@@ -43,7 +44,7 @@ pub fn grade(score: u32) -> &'static str {
     }
 }
 
-/// Durumlara göre kontrol sayıları.
+/// Check counts by status.
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
 pub struct Summary {
     pub pass: usize,
@@ -77,7 +78,7 @@ pub mod tests {
     use super::*;
     use crate::checks::Severity;
 
-    /// Testlerde kullanılan kısa sonuç üretici (diğer modüller de kullanır).
+    /// Short result builder used in tests (other modules use it too).
     pub fn result(id: &'static str, status: Status, weight: u32) -> CheckResult {
         CheckResult {
             id,
@@ -86,21 +87,21 @@ pub mod tests {
             severity: Severity::Medium,
             weight,
             cis: None,
-            detail: format!("{id} ayrıntısı"),
-            advice: "öneri",
+            detail: format!("{id} detail"),
+            advice: "advice",
             exempt: None,
             fix: None,
         }
     }
 
     #[test]
-    fn hepsi_gecerse_yuz() {
+    fn all_passing_scores_hundred() {
         let results = [result("a", Status::Pass, 25), result("b", Status::Pass, 10)];
         assert_eq!(calculate_score(&results), 100);
     }
 
     #[test]
-    fn uyari_yarim_puan_basarisiz_sifir() {
+    fn warn_is_half_points_fail_is_zero() {
         let results = [
             result("a", Status::Pass, 50),
             result("b", Status::Warn, 30),
@@ -111,16 +112,16 @@ pub mod tests {
     }
 
     #[test]
-    fn tek_agirlikli_uyari_yuvarlama_hatasi_yapmaz() {
-        // Eski hesap 5 / 2 = 2 diyerek puanı düşük gösteriyordu.
+    fn odd_weight_warn_has_no_rounding_error() {
+        // The old calculation said 5 / 2 = 2, understating the score.
         let results = [result("a", Status::Warn, 5)];
         assert_eq!(calculate_score(&results), 50);
     }
 
     #[test]
-    fn bilinmeyen_ve_istisna_paydaya_girmez() {
+    fn unknown_and_exempt_stay_out_of_denominator() {
         let mut exempt = result("c", Status::Fail, 50);
-        exempt.exempt = Some("gerekçe".into());
+        exempt.exempt = Some("reason".into());
         let results = [
             result("a", Status::Pass, 10),
             result("b", Status::Unknown, 90),
@@ -130,12 +131,12 @@ pub mod tests {
     }
 
     #[test]
-    fn bos_listede_sifira_bolmez() {
+    fn empty_list_does_not_divide_by_zero() {
         assert_eq!(calculate_score(&[]), 0);
     }
 
     #[test]
-    fn harf_notlari() {
+    fn letter_grades() {
         assert_eq!(grade(100), "A");
         assert_eq!(grade(90), "A");
         assert_eq!(grade(89), "B");
@@ -145,9 +146,9 @@ pub mod tests {
     }
 
     #[test]
-    fn ozet_sayilari() {
+    fn summary_counts() {
         let mut exempt = result("d", Status::Warn, 5);
-        exempt.exempt = Some("gerekçe".into());
+        exempt.exempt = Some("reason".into());
         let results = [
             result("a", Status::Pass, 1),
             result("b", Status::Fail, 1),

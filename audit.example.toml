@@ -1,21 +1,22 @@
-# macos-audit örnek yapılandırması.
+# Example configuration for macos-audit.
 #
-# Kullanmak için bu dosyayı `audit.toml` adıyla proje dizinine ya da
-# `~/.config/macos-audit/audit.toml` yoluna kopyala. Tüm alanlar isteğe
-# bağlıdır. Geçerli kontrol kimlikleri için: `macos-audit --list`
+# To use it, copy this file as `audit.toml` into the project directory or to
+# `~/.config/macos-audit/audit.toml`. All fields are optional. For the valid
+# check ids, run: `macos-audit --list`
 
-# Puan bu değerin altındaysa çıkış kodu 1 olur (CI'da eşik olarak kullanışlı).
+# The exit code is 1 if the score is below this value (handy as a threshold in CI).
 min_score = 80
 
-# Hiç çalıştırılmayacak kontroller.
+# Checks that are never run.
 skip = ["airdrop"]
 
-# Kontrollerin puandaki ağırlığını değiştir.
+# Change the weight of checks in the score.
 [weights]
 filevault = 40
 stealth = 2
 
-# Bilerek kabul edilen durumlar. İstisnalı kontrol çalışır ve raporda
-# "İSTİSNA" olarak görünür ama puana ve çıkış koduna etki etmez.
+# Deliberately accepted conditions. A check with an exception still runs and
+# shows up as "EXCEPTION" in the report, but does not affect the score or the
+# exit code.
 [exceptions]
-ssh = "Geliştirme makinesi; SSH bilerek açık"
+ssh = "Development machine; SSH is enabled on purpose"

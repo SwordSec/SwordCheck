@@ -1,9 +1,9 @@
-//! macOS güvenlik kontrolleri.
+//! macOS security checks.
 //!
-//! Her kontrol `Check` trait'ini uygulayan küçük bir tiptir. Kontrol yalnızca
-//! salt okunur komutlar çalıştırır ve bir `Outcome` üretir; ad, ağırlık,
-//! önem derecesi gibi sabit bilgiler trait metotlarından gelir. Yeni bir
-//! kontrol eklemek için: tipi yaz, `Check` uygula, `registry()` listesine ekle.
+//! Each check is a small type that implements the `Check` trait. A check only
+//! runs read-only commands and produces an `Outcome`; fixed information such
+//! as the name, weight and severity comes from the trait methods. To add a new
+//! check: write the type, implement `Check`, add it to the `registry()` list.
 
 mod accounts;
 mod network;
@@ -15,33 +15,33 @@ use crate::config::Config;
 use crate::runner::CommandRunner;
 use serde::{Deserialize, Serialize, Serializer};
 
-/// Bir kontrolün sonucu.
+/// The result of a check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
-    /// Sorun yok.
+    /// No problem.
     Pass,
-    /// Dikkat edilmesi gereken bir durum var.
+    /// There is something that deserves attention.
     Warn,
-    /// Önemli bir güvenlik önlemi eksik.
+    /// An important security measure is missing.
     Fail,
-    /// Durum tespit edilemedi (komut çalışmadı, izin yok vb.).
+    /// The state could not be determined (command failed, no permission, etc.).
     Unknown,
 }
 
 impl Status {
-    /// Çıktılarda kullanılan Türkçe etiket.
+    /// The label used in output.
     pub fn label(self) -> &'static str {
         match self {
-            Status::Pass => "GEÇTİ",
-            Status::Warn => "UYARI",
-            Status::Fail => "BAŞARISIZ",
-            Status::Unknown => "BİLİNMİYOR",
+            Status::Pass => "PASS",
+            Status::Warn => "WARN",
+            Status::Fail => "FAIL",
+            Status::Unknown => "UNKNOWN",
         }
     }
 }
 
-/// Kontrolün önem derecesi: sorun çıkarsa ne kadar ciddi?
+/// The severity of a check: how serious is it if a problem turns up?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -54,15 +54,15 @@ pub enum Severity {
 impl Severity {
     pub fn label(self) -> &'static str {
         match self {
-            Severity::Low => "düşük",
-            Severity::Medium => "orta",
-            Severity::High => "yüksek",
-            Severity::Critical => "kritik",
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
         }
     }
 }
 
-/// Bir kontrolün çalıştırılınca ürettiği değişken kısım.
+/// The variable part a check produces when it is run.
 #[derive(Debug)]
 pub struct Outcome {
     pub status: Status,
@@ -71,8 +71,8 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    // Kısa kurucu fonksiyonlar: `impl Into<String>` sayesinde hem `&str`
-    // hem `String` kabul edilir.
+    // Short constructor functions: thanks to `impl Into<String>` both `&str`
+    // and `String` are accepted.
     pub fn pass(detail: impl Into<String>) -> Self {
         Self {
             status: Status::Pass,
@@ -106,18 +106,18 @@ impl Outcome {
     }
 }
 
-/// Bir sorunu düzelten komut. Yalnızca `--fix` modunda ve kullanıcı
-/// onaylarsa çalıştırılır.
+/// A command that fixes a problem. It is only run in `--fix` mode and only
+/// if the user confirms.
 #[derive(Debug, Clone, Copy)]
 pub struct Fix {
     pub program: &'static str,
     pub args: &'static [&'static str],
-    /// Komut yönetici yetkisi (sudo) gerektiriyor mu?
+    /// Does the command require administrator privileges (sudo)?
     pub sudo: bool,
 }
 
 impl Fix {
-    /// Kullanıcıya gösterilecek tam komut satırı.
+    /// The full command line to show to the user.
     pub fn command_line(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.sudo {
@@ -125,7 +125,7 @@ impl Fix {
         }
         parts.push(self.program.to_string());
         for arg in self.args {
-            // Boşluk içeren argümanları tırnak içine alıyoruz.
+            // We wrap arguments that contain spaces in quotes.
             if arg.contains(' ') {
                 parts.push(format!("\"{arg}\""));
             } else {
@@ -136,37 +136,37 @@ impl Fix {
     }
 }
 
-// JSON çıktısında düzeltmeyi tek bir komut satırı metni olarak gösteriyoruz.
+// In JSON output we show the fix as a single command-line string.
 impl Serialize for Fix {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.command_line())
     }
 }
 
-/// Tüm kontrollerin uyguladığı ortak arayüz.
+/// The common interface implemented by all checks.
 ///
-/// `Sync` şartı kontrollerin paralel çalıştırılabilmesi içindir.
+/// The `Sync` bound is there so that checks can be run in parallel.
 pub trait Check: Sync {
-    /// Komut satırında ve yapılandırmada kullanılan kısa kimlik.
+    /// The short identifier used on the command line and in the configuration.
     fn id(&self) -> &'static str;
-    /// Kullanıcıya gösterilen ad.
+    /// The name shown to the user.
     fn name(&self) -> &'static str;
-    /// Puandaki varsayılan ağırlık.
+    /// The default weight in the score.
     fn weight(&self) -> u32;
     fn severity(&self) -> Severity;
-    /// İlgili CIS Apple macOS Benchmark bölümü (varsa).
+    /// The relevant CIS Apple macOS Benchmark section (if any).
     fn cis(&self) -> Option<&'static str> {
         None
     }
-    /// Otomatik düzeltme komutu (varsa).
+    /// The automatic fix command (if any).
     fn fix(&self) -> Option<Fix> {
         None
     }
-    /// Kontrolü çalıştırır. Hiçbir ayarı değiştirmemelidir.
+    /// Runs the check. It must not change any setting.
     fn run(&self, runner: &dyn CommandRunner) -> Outcome;
 }
 
-/// Tek bir kontrolün tam raporu: sabit bilgiler + çalıştırma sonucu.
+/// The full report of a single check: fixed information + the run result.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
     pub id: &'static str,
@@ -177,25 +177,25 @@ pub struct CheckResult {
     pub cis: Option<&'static str>,
     pub detail: String,
     pub advice: &'static str,
-    /// Yapılandırmada istisna tanımlandıysa gerekçesi. İstisnalı kontroller
-    /// puana ve çıkış koduna etki etmez.
+    /// The justification, if an exception is defined in the configuration.
+    /// Checks with an exception do not affect the score or the exit code.
     pub exempt: Option<String>,
     pub fix: Option<Fix>,
 }
 
 impl CheckResult {
-    /// Kontrol sorunlu mu (istisna tanımlanmamış bir Fail/Warn)?
+    /// Is the check an issue (a Fail/Warn with no exception defined)?
     pub fn is_issue(&self) -> bool {
         self.exempt.is_none() && matches!(self.status, Status::Fail | Status::Warn)
     }
 
-    /// Çıkış kodunu etkileyen başarısızlık mı?
+    /// Is it a failure that affects the exit code?
     pub fn is_failure(&self) -> bool {
         self.exempt.is_none() && self.status == Status::Fail
     }
 }
 
-/// Bilinen tüm kontroller, çıktıda görünecekleri sırayla.
+/// All known checks, in the order they appear in the output.
 pub fn registry() -> Vec<Box<dyn Check>> {
     vec![
         Box::new(system::FileVault),
@@ -218,7 +218,7 @@ pub fn registry() -> Vec<Box<dyn Check>> {
     ]
 }
 
-/// Tek bir kontrolü çalıştırıp yapılandırmayı (ağırlık, istisna) uygular.
+/// Runs a single check and applies the configuration (weight, exception).
 pub fn run_one(check: &dyn Check, runner: &dyn CommandRunner, config: &Config) -> CheckResult {
     let outcome = check.run(runner);
     build_result(check, outcome, config)
@@ -230,7 +230,7 @@ fn build_result(check: &dyn Check, outcome: Outcome, config: &Config) -> CheckRe
         name: check.name(),
         status: outcome.status,
         severity: check.severity(),
-        // Yapılandırmada ağırlık verilmişse onu, yoksa varsayılanı kullan.
+        // Use the weight from the configuration if given, otherwise the default.
         weight: config
             .weights
             .get(check.id())
@@ -244,11 +244,11 @@ fn build_result(check: &dyn Check, outcome: Outcome, config: &Config) -> CheckRe
     }
 }
 
-/// Verilen kontrolleri paralel çalıştırır; sonuçlar giriş sırasını korur.
+/// Runs the given checks in parallel; results keep the input order.
 ///
-/// `std::thread::scope`, iş parçacıklarının `checks`, `runner` ve `config`
-/// gibi yerel verileri ödünç almasına izin verir: kapsam bitmeden tüm
-/// iş parçacıkları tamamlanmış olur.
+/// `std::thread::scope` lets the threads borrow local data such as `checks`,
+/// `runner` and `config`: all threads are guaranteed to have finished before
+/// the scope ends.
 pub fn run_checks(
     checks: &[Box<dyn Check>],
     runner: &dyn CommandRunner,
@@ -264,12 +264,12 @@ pub fn run_checks(
             .into_iter()
             .zip(checks)
             .map(|(handle, check)| {
-                // Bir kontrol panic ederse tüm programı düşürmek yerine
-                // o kontrolü "bilinmiyor" olarak raporluyoruz.
+                // If a check panics, instead of bringing down the whole
+                // program we report that check as "unknown".
                 handle.join().unwrap_or_else(|_| {
                     build_result(
                         check.as_ref(),
-                        Outcome::unknown("Kontrol beklenmedik şekilde sonlandı."),
+                        Outcome::unknown("The check terminated unexpectedly."),
                         config,
                     )
                 })
@@ -278,29 +278,29 @@ pub fn run_checks(
     })
 }
 
-/// macOS sürümünü "macOS 26.6.2" biçiminde döndürür.
+/// Returns the macOS version in the form "macOS 26.6.2".
 pub fn os_version(runner: &dyn CommandRunner) -> String {
     stdout_of(runner, "sw_vers", &["-productVersion"])
         .map(|version| format!("macOS {version}"))
-        .unwrap_or_else(|_| "macOS (sürüm okunamadı)".to_string())
+        .unwrap_or_else(|_| "macOS (version could not be read)".to_string())
 }
 
-// ---- Kontrollerin ortak kullandığı yardımcılar ----
+// ---- Helpers shared by the checks ----
 
-/// Komutu çalıştırıp stdout'u döndürür; başarısızsa hata açıklaması verir.
+/// Runs the command and returns its stdout; on failure gives an error description.
 fn stdout_of(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<String, String> {
     runner.run(program, args)?.into_stdout()
 }
 
-/// `defaults read` sonucunun üç olası hali.
+/// The three possible states of a `defaults read` result.
 enum Pref {
     Value(String),
-    /// Anahtar hiç tanımlanmamış.
+    /// The key has never been defined.
     Missing,
     Error(String),
 }
 
-/// macOS tercih (preferences) anahtarını okur.
+/// Reads a macOS preferences key.
 fn read_pref(runner: &dyn CommandRunner, domain: &str, key: &str) -> Pref {
     match runner.run("defaults", &["read", domain, key]) {
         Err(err) => Pref::Error(err),
@@ -310,10 +310,10 @@ fn read_pref(runner: &dyn CommandRunner, domain: &str, key: &str) -> Pref {
     }
 }
 
-/// `netstat -an -p tcp` çıktısında verilen port dinleniyor mu?
+/// Is the given port being listened on in the `netstat -an -p tcp` output?
 ///
-/// Satırlar şöyle görünür: `tcp4 0 0 *.22 *.* LISTEN`
-/// 4. alan yerel adres, 6. alan bağlantı durumudur.
+/// Lines look like this: `tcp4 0 0 *.22 *.* LISTEN`
+/// The 4th field is the local address, the 6th field is the connection state.
 fn listening_on(netstat_output: &str, port: u16) -> bool {
     let suffix = format!(".{port}");
     netstat_output.lines().any(|line| {
@@ -322,7 +322,7 @@ fn listening_on(netstat_output: &str, port: u16) -> bool {
     })
 }
 
-/// Dinlenen TCP portlarını listeleyen ortak komut.
+/// The shared command that lists listening TCP ports.
 fn netstat(runner: &dyn CommandRunner) -> Result<String, String> {
     stdout_of(runner, "netstat", &["-an", "-p", "tcp"])
 }
@@ -333,7 +333,7 @@ mod tests {
     use crate::runner::MockRunner;
 
     #[test]
-    fn acik_portu_bulur() {
+    fn finds_open_port() {
         let sample = "\
 tcp4       0      0  *.22                   *.*                    LISTEN
 tcp4       0      0  127.0.0.1.5000         *.*                    LISTEN";
@@ -342,7 +342,7 @@ tcp4       0      0  127.0.0.1.5000         *.*                    LISTEN";
     }
 
     #[test]
-    fn benzer_portlari_karistirmaz() {
+    fn does_not_confuse_similar_ports() {
         let sample = "\
 tcp4       0      0  *.8022                 *.*                    LISTEN
 tcp4       0      0  127.0.0.1.2222         *.*                    LISTEN";
@@ -350,56 +350,59 @@ tcp4       0      0  127.0.0.1.2222         *.*                    LISTEN";
     }
 
     #[test]
-    fn dinlemeyen_baglantiyi_saymaz() {
+    fn does_not_count_non_listening_connection() {
         let sample = "tcp4  0  0  10.0.0.5.22  10.0.0.9.51234  ESTABLISHED";
         assert!(!listening_on(sample, 22));
     }
 
     #[test]
-    fn kimlikler_benzersiz() {
+    fn ids_are_unique() {
         let mut ids: Vec<&str> = registry().iter().map(|check| check.id()).collect();
         let total = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), total, "aynı kimliğe sahip iki kontrol var");
+        assert_eq!(ids.len(), total, "two checks share the same id");
     }
 
     #[test]
-    fn komutlar_calismazsa_bilinmiyor_doner() {
-        // Boş mock: her komut "tanımsız" hatası verir. Hiçbir kontrol
-        // panic etmemeli ya da yanlışlıkla "geçti" dememeli.
+    fn returns_unknown_when_commands_fail() {
+        // Empty mock: every command gives an "undefined" error. No check
+        // should panic or mistakenly say "pass".
         let runner = MockRunner::new();
         let config = Config::default();
         for result in run_checks(&registry(), &runner, &config) {
             if matches!(result.id, "launch-items" | "npm-packages") {
-                continue; // Dosya sistemini okurlar; komutlara bağlı değildirler.
+                continue; // They read the file system; they do not depend on commands.
             }
             assert_eq!(
                 result.status,
                 Status::Unknown,
-                "{} komut hatasında Unknown dönmeliydi",
+                "{} should have returned Unknown on a command error",
                 result.id
             );
         }
     }
 
     #[test]
-    fn yapilandirma_agirlik_ve_istisna_uygular() {
+    fn config_applies_weight_and_exception() {
         let runner = MockRunner::new().ok("fdesetup status", "FileVault is Off.");
         let mut config = Config::default();
         config.weights.insert("filevault".into(), 40);
         config
             .exceptions
-            .insert("filevault".into(), "test makinesi".into());
+            .insert("filevault".into(), "test machine".into());
 
         let result = run_one(&system::FileVault, &runner, &config);
         assert_eq!(result.status, Status::Fail);
         assert_eq!(result.weight, 40);
-        assert!(!result.is_failure(), "istisnalı kontrol başarısız sayılmaz");
+        assert!(
+            !result.is_failure(),
+            "a check with an exception does not count as a failure"
+        );
     }
 
     #[test]
-    fn duzeltme_komut_satiri() {
+    fn fix_command_line() {
         let fix = Fix {
             program: "defaults",
             args: &["write", "x", "Contacts Only"],

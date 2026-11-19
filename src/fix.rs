@@ -1,8 +1,9 @@
-//! `--fix` modu: düzeltilebilir sorunlar için komutu gösterir ve kullanıcı
-//! onaylarsa çalıştırır.
+//! `--fix` mode: shows the command for each fixable issue and runs it if the
+//! user confirms.
 //!
-//! Aracın geri kalanı salt okunurdur; sistemde değişiklik yapan tek yer
-//! burasıdır. Bu yüzden her komut açıkça gösterilir ve tek tek onay istenir.
+//! The rest of the tool is read-only; this is the only place that changes
+//! the system. That is why every command is shown explicitly and confirmed
+//! one by one.
 
 use crate::checks::{Check, CheckResult, Fix};
 use crate::config::Config;
@@ -13,13 +14,13 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::process::Command;
 
 pub struct FixOptions {
-    /// Komutları yalnızca göster, çalıştırma.
+    /// Only show the commands, do not run them.
     pub dry_run: bool,
-    /// Onay sormadan uygula.
+    /// Apply without asking for confirmation.
     pub yes: bool,
 }
 
-/// Düzeltme turunun özeti.
+/// Summary of a fix pass.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FixSummary {
     pub applied: usize,
@@ -27,7 +28,7 @@ pub struct FixSummary {
     pub skipped: usize,
 }
 
-/// Sorunlu kontrolleri dolaşıp düzeltmeleri uygular.
+/// Walks through the checks with issues and applies the fixes.
 pub fn run_fixes(
     results: &[CheckResult],
     checks: &[Box<dyn Check>],
@@ -38,33 +39,33 @@ pub fn run_fixes(
     let (fixable, manual) = split_issues(results);
 
     println!();
-    println!("{}", " Düzeltme modu ".on_magenta().white().bold());
+    println!("{}", " Fix mode ".on_magenta().white().bold());
 
     if fixable.is_empty() {
-        println!("Otomatik düzeltilebilecek bir sorun yok.");
+        println!("There are no issues that can be fixed automatically.");
     }
 
     for (result, fix) in fixable {
         println!();
         println!("{} {}", "▸".cyan(), result.name.bold());
-        println!("  Sorun: {}", result.detail);
-        println!("  Komut: {}", fix.command_line().cyan());
+        println!("  Issue:   {}", result.detail);
+        println!("  Command: {}", fix.command_line().cyan());
 
         if options.dry_run {
-            println!("  {}", "[dry-run] komut çalıştırılmadı.".dimmed());
+            println!("  {}", "[dry-run] command was not run.".dimmed());
             summary.skipped += 1;
             continue;
         }
-        if !options.yes && !confirm("  Uygulansın mı? [e/H] ") {
-            println!("  {}", "Atlandı.".dimmed());
+        if !options.yes && !confirm("  Apply? [y/N] ") {
+            println!("  {}", "Skipped.".dimmed());
             summary.skipped += 1;
             continue;
         }
 
         match apply(&fix) {
             Ok(()) => {
-                // Düzeltmenin işe yaradığını varsaymıyoruz: kontrolü yeniden
-                // çalıştırıp sonucu gösteriyoruz. Yeni runner = boş önbellek.
+                // We do not assume the fix worked: we re-run the check and
+                // show the result. New runner = empty cache.
                 let check = checks.iter().find(|check| check.id() == result.id);
                 let verified = check.map(|check| {
                     crate::checks::run_one(check.as_ref(), &SystemRunner::new(), config)
@@ -78,7 +79,7 @@ pub fn run_fixes(
                         println!("  {}", report::text_line(&after));
                         println!(
                             "  {}",
-                            "Komut çalıştı ama sorun sürüyor; elle kontrol et.".yellow()
+                            "The command ran but the issue persists; check it manually.".yellow()
                         );
                         summary.failed += 1;
                     }
@@ -86,7 +87,7 @@ pub fn run_fixes(
                 }
             }
             Err(err) => {
-                println!("  {} {err}", "Başarısız:".red().bold());
+                println!("  {} {err}", "Failed:".red().bold());
                 summary.failed += 1;
             }
         }
@@ -94,7 +95,7 @@ pub fn run_fixes(
 
     if !manual.is_empty() {
         println!();
-        println!("{}", "Elle düzeltilmesi gerekenler".bold());
+        println!("{}", "Needs a manual fix".bold());
         for result in manual {
             println!("  {} {}: {}", "•".yellow(), result.name.bold(), result.advice);
         }
@@ -104,19 +105,19 @@ pub fn run_fixes(
     if options.dry_run {
         println!(
             "{}",
-            "Önizleme tamamlandı; hiçbir ayar değiştirilmedi.".dimmed()
+            "Preview complete; no settings were changed.".dimmed()
         );
     } else {
         println!(
-            "Düzeltme özeti: {} uygulandı · {} başarısız · {} atlandı",
+            "Fix summary: {} applied · {} failed · {} skipped",
             summary.applied, summary.failed, summary.skipped
         );
     }
     summary
 }
 
-/// Sorunları "otomatik düzeltilebilir" ve "elle düzeltilecek" diye ayırır.
-/// İstisnalı kontrollere dokunulmaz (`is_issue` onları dışarıda bırakır).
+/// Splits the issues into "automatically fixable" and "needs a manual fix".
+/// Exempted checks are left alone (`is_issue` excludes them).
 fn split_issues(results: &[CheckResult]) -> (Vec<(&CheckResult, Fix)>, Vec<&CheckResult>) {
     let mut fixable = Vec::new();
     let mut manual = Vec::new();
@@ -129,11 +130,11 @@ fn split_issues(results: &[CheckResult]) -> (Vec<(&CheckResult, Fix)>, Vec<&Chec
     (fixable, manual)
 }
 
-/// Kullanıcıdan evet/hayır yanıtı alır. Girdi terminal değilse (ör. betik
-/// içinde) güvenli tarafta kalıp "hayır" sayarız.
+/// Gets a yes/no answer from the user. If the input is not a terminal (e.g.
+/// inside a script) we stay on the safe side and treat it as "no".
 fn confirm(prompt: &str) -> bool {
     if !std::io::stdin().is_terminal() {
-        println!("{prompt}(etkileşimli terminal yok; `--yes` ile onay verilebilir)");
+        println!("{prompt}(no interactive terminal; confirm with `--yes` instead)");
         return false;
     }
     print!("{prompt}");
@@ -149,12 +150,12 @@ fn confirm(prompt: &str) -> bool {
 fn is_yes(answer: &str) -> bool {
     matches!(
         answer.trim().to_lowercase().as_str(),
-        "e" | "evet" | "y" | "yes"
+        "y" | "yes"
     )
 }
 
-/// Düzeltme komutunu çalıştırır. Girdi/çıktı terminale bağlı kalır; böylece
-/// `sudo` parolayı doğrudan kullanıcıya sorabilir.
+/// Runs the fix command. Input/output stay attached to the terminal, so
+/// `sudo` can ask the user for the password directly.
 fn apply(fix: &Fix) -> Result<(), String> {
     let mut command = if fix.sudo {
         let mut command = Command::new("sudo");
@@ -167,12 +168,12 @@ fn apply(fix: &Fix) -> Result<(), String> {
     let status = command
         .args(fix.args)
         .status()
-        .map_err(|err| format!("komut başlatılamadı: {err}"))?;
+        .map_err(|err| format!("could not start the command: {err}"))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(format!("komut hata koduyla bitti ({status})"))
+        Err(format!("command exited with an error code ({status})"))
     }
 }
 
@@ -189,17 +190,17 @@ mod tests {
     };
 
     #[test]
-    fn evet_yanitlari() {
-        for yes in ["e", "E", "evet", "y", "YES", " e\n"] {
-            assert!(is_yes(yes), "{yes:?} evet sayılmalı");
+    fn yes_answers() {
+        for yes in ["y", "Y", "yes", "YES", " y\n"] {
+            assert!(is_yes(yes), "{yes:?} should count as yes");
         }
-        for no in ["", "\n", "h", "hayır", "n", "belki"] {
-            assert!(!is_yes(no), "{no:?} hayır sayılmalı");
+        for no in ["", "\n", "n", "no", "maybe"] {
+            assert!(!is_yes(no), "{no:?} should count as no");
         }
     }
 
     #[test]
-    fn sorunlari_dogru_ayirir() {
+    fn splits_issues_correctly() {
         let mut fixable = result("firewall", Status::Fail, 20);
         fixable.fix = Some(FIX);
 
@@ -210,7 +211,7 @@ mod tests {
 
         let mut exempt = result("ssh", Status::Warn, 10);
         exempt.fix = Some(FIX);
-        exempt.exempt = Some("bilerek açık".into());
+        exempt.exempt = Some("enabled on purpose".into());
 
         let results = [fixable, manual, passing, exempt];
         let (fixable, manual) = split_issues(&results);
@@ -222,9 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_hicbir_sey_uygulamaz() {
+    fn dry_run_applies_nothing() {
         let mut fixable = result("firewall", Status::Fail, 20);
-        // Çalışırsa başarısız olacak bir komut: dry-run'da hiç çağrılmamalı.
+        // A command that would fail if run: it must never be called in a dry run.
         fixable.fix = Some(Fix {
             program: "false",
             args: &[],
@@ -251,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn komut_basari_ve_hata_durumu() {
+    fn command_success_and_failure() {
         assert!(apply(&FIX).is_ok());
         let failing = Fix {
             program: "false",

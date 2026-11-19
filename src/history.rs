@@ -1,23 +1,23 @@
-//! Denetim geçmişi: her çalıştırma `~/.macos-audit/history.json` dosyasına
-//! eklenir ve bir sonraki çalıştırmada önceki durumla karşılaştırılır.
+//! Audit history: every run is appended to `~/.macos-audit/history.json`
+//! and compared against the previous state on the next run.
 
 use crate::checks::{CheckResult, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Dosyada tutulacak en fazla kayıt sayısı.
+/// Maximum number of records kept in the file.
 const MAX_RECORDS: usize = 100;
 
-/// Tek bir denetim çalıştırmasının özeti.
+/// Summary of a single audit run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
-    /// RFC 3339 biçiminde yerel zaman.
+    /// Local time in RFC 3339 format.
     pub timestamp: String,
     pub os_version: String,
     pub score: u32,
-    /// Kontrol kimliği → durum. `BTreeMap` anahtarları sıralı tutar;
-    /// dosya her yazımda aynı düzende olur.
+    /// Check id → status. `BTreeMap` keeps its keys sorted, so the file
+    /// has the same layout on every write.
     pub checks: BTreeMap<String, Status>,
 }
 
@@ -35,7 +35,7 @@ impl RunRecord {
     }
 }
 
-/// Bir kontrolün iki çalıştırma arasındaki durum değişikliği.
+/// A check's status change between two runs.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Change {
     pub id: &'static str,
@@ -45,7 +45,7 @@ pub struct Change {
 }
 
 impl Change {
-    /// Değişiklik iyiye mi gidiyor? (Pass en iyi, Fail en kötü.)
+    /// Is the change for the better? (Pass is best, Fail is worst.)
     pub fn improved(&self) -> bool {
         rank(self.to) > rank(self.from)
     }
@@ -60,8 +60,8 @@ fn rank(status: Status) -> u8 {
     }
 }
 
-/// Geçmiş dosyasının yolu. `MACOS_AUDIT_HOME` ortam değişkeni ile dizin
-/// değiştirilebilir (testlerde ve denemelerde kullanışlı).
+/// Path of the history file. The directory can be changed with the
+/// `MACOS_AUDIT_HOME` environment variable (handy in tests and experiments).
 pub fn history_path() -> Option<PathBuf> {
     let dir = match std::env::var_os("MACOS_AUDIT_HOME") {
         Some(dir) => PathBuf::from(dir),
@@ -70,19 +70,19 @@ pub fn history_path() -> Option<PathBuf> {
     Some(dir.join("history.json"))
 }
 
-/// Geçmiş kayıtlarını okur. Dosya yoksa boş liste döner; bozuksa hata verir
-/// (üzerine yazıp veriyi kaybetmemek için).
+/// Reads the history records. Returns an empty list if the file does not
+/// exist; fails if it is corrupt (so we do not overwrite it and lose data).
 pub fn load(path: &Path) -> Result<Vec<RunRecord>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
-            .map_err(|err| format!("{} ayrıştırılamadı: {err}", path.display())),
+            .map_err(|err| format!("could not parse {}: {err}", path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(format!("{} okunamadı: {err}", path.display())),
+        Err(err) => Err(format!("could not read {}: {err}", path.display())),
     }
 }
 
-/// Yeni kaydı ekleyip dosyayı yazar; en eski kayıtlar `MAX_RECORDS` aşılınca
-/// silinir.
+/// Appends the new record and writes the file; the oldest records are
+/// dropped once `MAX_RECORDS` is exceeded.
 pub fn append(path: &Path, mut records: Vec<RunRecord>, record: RunRecord) -> Result<(), String> {
     records.push(record);
     if records.len() > MAX_RECORDS {
@@ -92,14 +92,15 @@ pub fn append(path: &Path, mut records: Vec<RunRecord>, record: RunRecord) -> Re
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|err| format!("{} oluşturulamadı: {err}", dir.display()))?;
+            .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
-    std::fs::write(path, json).map_err(|err| format!("{} yazılamadı: {err}", path.display()))
+    std::fs::write(path, json).map_err(|err| format!("could not write {}: {err}", path.display()))
 }
 
-/// Önceki kayıtla şimdiki sonuçlar arasında durumu değişen kontroller.
-/// Önceki kayıtta bulunmayan (yeni eklenen) kontroller değişiklik sayılmaz.
+/// Checks whose status changed between the previous record and the current
+/// results. Checks missing from the previous record (newly added ones) do
+/// not count as changes.
 pub fn diff(previous: &RunRecord, results: &[CheckResult]) -> Vec<Change> {
     results
         .iter()
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn degisen_kontrolleri_bulur() {
+    fn finds_changed_checks() {
         let before = record(
             50,
             &[
@@ -136,7 +137,7 @@ mod tests {
         let now = [
             result("firewall", Status::Pass, 20),
             result("sip", Status::Pass, 20),
-            result("yeni", Status::Fail, 5), // önceki kayıtta yok: sayılmaz
+            result("new", Status::Fail, 5), // not in the previous record: not counted
         ];
 
         let changes = diff(&before, &now);
@@ -146,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn kotulesme_iyilesme_sayilmaz() {
+    fn regression_is_not_an_improvement() {
         let change = Change {
             id: "x",
             name: "x",
@@ -157,11 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn yazip_geri_okur_ve_sinirlar() {
+    fn writes_reads_back_and_truncates() {
         let dir = std::env::temp_dir().join(format!("macos-audit-hist-{}", std::process::id()));
         let path = dir.join("history.json");
 
-        assert!(load(&path).unwrap().is_empty(), "dosya yokken boş liste");
+        assert!(load(&path).unwrap().is_empty(), "empty list when the file is missing");
 
         let results = [result("a", Status::Pass, 1)];
         for score in 0..(MAX_RECORDS as u32 + 5) {
@@ -174,16 +175,16 @@ mod tests {
 
         assert_eq!(records.len(), MAX_RECORDS);
         assert_eq!(records.last().unwrap().score, MAX_RECORDS as u32 + 4);
-        assert_eq!(records[0].score, 5, "en eski 5 kayıt silinmeli");
+        assert_eq!(records[0].score, 5, "the 5 oldest records should be dropped");
         assert_eq!(records[0].checks["a"], Status::Pass);
     }
 
     #[test]
-    fn bozuk_dosya_hata_verir() {
+    fn corrupt_file_is_an_error() {
         let dir = std::env::temp_dir().join(format!("macos-audit-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.json");
-        std::fs::write(&path, "{ bozuk").unwrap();
+        std::fs::write(&path, "{ broken").unwrap();
 
         let loaded = load(&path);
         std::fs::remove_dir_all(&dir).unwrap();
