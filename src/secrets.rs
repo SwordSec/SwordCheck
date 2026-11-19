@@ -19,6 +19,7 @@
 //!   the masked form (`sk-ant-api0…a3F9`). The raw value is kept in memory only
 //!   to match copies of the same secret across different files.
 
+use crate::progress::Progress;
 use colored::Colorize;
 use regex::Regex;
 use serde::Serialize;
@@ -475,6 +476,13 @@ fn git_tracked(path: &Path) -> bool {
 
 /// Scans the files by spreading them across threads and summarizes the result.
 pub fn scan(files: &[PathBuf]) -> Scan {
+    scan_with(files, &Progress::none())
+}
+
+/// Like `scan`, reporting how many files have been processed.
+pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
+    progress.stage(format!("Scanning {} files for secrets", files.len()));
+    let processed = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
     let scanned = AtomicUsize::new(0);
     let collected: Mutex<Vec<Finding>> = Mutex::new(Vec::new());
@@ -493,6 +501,12 @@ pub fn scan(files: &[PathBuf]) -> Scan {
                         if !findings.is_empty() {
                             collected.lock().expect("lock is not poisoned").extend(findings);
                         }
+                    }
+                    // Reporting every file would cost more than scanning it.
+                    let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count % 8 == 0 || count == files.len() {
+                        progress.step(count, files.len());
+                        progress.note(display_path(path, home().as_deref()));
                     }
                 }
             });
@@ -837,7 +851,7 @@ impl SecretsReport {
 }
 
 /// Abbreviates the home directory as `~`.
-fn display_path(path: &Path, home: Option<&Path>) -> String {
+pub(crate) fn display_path(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(relative) => format!("~/{}", relative.display()),
         None => path.display().to_string(),

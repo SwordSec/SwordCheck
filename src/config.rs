@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 /// The configuration. All fields are optional (`#[serde(default)]`);
 /// `deny_unknown_fields` reports typos instead of silently swallowing them.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// If the score is below this value, the exit code is 1.

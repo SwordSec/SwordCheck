@@ -12,6 +12,8 @@
 //! - `history` : comparison with previous runs
 //! - `report`  : text / JSON / Markdown / HTML output
 //! - `npm`     : malicious npm package scan (`--npm`)
+//! - `vulns`   : vulnerability scan of dependencies, macOS and apps (`--vulns`)
+//! - `lockfiles`: lockfile parsers used by the vulnerability scan
 //! - `secrets` : API key / secret scan (`--secrets`)
 //! - `fix`     : fix mode with confirmation
 //! - `tui`     : interactive dashboard
@@ -20,12 +22,15 @@ mod checks;
 mod config;
 mod fix;
 mod history;
+mod lockfiles;
 mod npm;
+mod progress;
 mod report;
 mod runner;
 mod score;
 mod secrets;
 mod tui;
+mod vulns;
 
 use checks::{Check, CheckResult};
 use clap::{ArgAction, Parser};
@@ -116,16 +121,24 @@ struct Cli {
     tui: bool,
 
     /// Scan all npm packages (global + projects) for malware
-    #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history"])]
+    #[arg(long, group = "network_mode", conflicts_with_all = ["fix", "tui", "list", "history"])]
     npm: bool,
 
     /// With --npm: scan only this directory (repeatable)
     #[arg(long, value_name = "DIR", requires = "npm")]
     npm_path: Vec<PathBuf>,
 
-    /// With --npm: look up package names and versions in the OSV.dev malicious package database
-    #[arg(long, requires = "npm")]
+    /// With --npm or --vulns: query online databases (sends package names and versions only)
+    #[arg(long, requires = "network_mode")]
     online: bool,
+
+    /// List known vulnerabilities in project dependencies, macOS and common apps
+    #[arg(long, group = "network_mode", conflicts_with_all = ["fix", "tui", "list", "history", "secrets"])]
+    vulns: bool,
+
+    /// With --vulns: scan only the lockfiles under this path (repeatable; skips macOS and apps)
+    #[arg(long, value_name = "PATH", requires = "vulns")]
+    vulns_path: Vec<PathBuf>,
 
     /// Search .env and configuration files for API keys / secrets
     #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history", "npm"])]
@@ -202,19 +215,30 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     if cli.secrets {
         return run_secrets(&cli);
     }
+    if cli.vulns {
+        return run_vulns(&cli);
+    }
 
     let runner = SystemRunner::new();
     let os_version = checks::os_version(&runner);
-    let results = checks::run_checks(&checks, &runner, &config);
 
-    if cli.tui {
+    // Without any argument, an interactive terminal gets the dashboard;
+    // scripts and pipes keep getting the plain report.
+    let bare = std::env::args_os().len() == 1 && std::io::stdout().is_terminal();
+    if cli.tui || bare {
         if !std::io::stdout().is_terminal() {
             return Err("--tui requires an interactive terminal.".to_string());
         }
-        tui::run(&checks, &config, os_version, results)
-            .map_err(|err| format!("Could not run the dashboard: {err}"))?;
+        let setup = tui::Setup {
+            check_ids: checks.iter().map(|check| check.id().to_string()).collect(),
+            config,
+            os_version,
+        };
+        tui::run(setup).map_err(|err| format!("Could not run the dashboard: {err}"))?;
         return Ok(ExitCode::SUCCESS);
     }
+
+    let results = checks::run_checks(&checks, &runner, &config);
 
     // Partial runs (--only/--skip) are not written to the history: their
     // scores cannot be compared with a full audit.
@@ -387,6 +411,73 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     Ok(if exposed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
+/// `--vulns`: lists known vulnerabilities in project dependencies, macOS and
+/// common applications. The exit code is 1 when a known-exploited
+/// vulnerability (or malware) is found; other findings do not affect it.
+fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
+    let format = if cli.json { Format::Json } else { cli.format };
+    if !matches!(format, Format::Text | Format::Json) {
+        return Err("--vulns only supports the text and json formats.".to_string());
+    }
+
+    // An explicit path narrows the scan to those projects.
+    let (paths, system) = if cli.vulns_path.is_empty() {
+        (lockfiles::default_files(), vulns::system_items(&SystemRunner::new()))
+    } else {
+        let mut paths = Vec::new();
+        for path in &cli.vulns_path {
+            if !path.exists() {
+                return Err(format!("{} not found.", path.display()));
+            }
+            paths.extend(lockfiles::files_under(path));
+        }
+        (paths, Vec::new())
+    };
+    // Progress goes to stderr so that it never mixes with the report.
+    let progress = if !cli.quiet && std::io::stderr().is_terminal() {
+        progress::Progress::stderr()
+    } else {
+        progress::Progress::none()
+    };
+    let lockfiles = vulns::read_lockfiles(&paths, &progress);
+
+    let scan = if cli.online {
+        let cache = history::history_path()
+            .and_then(|path| path.parent().map(|dir| dir.join("cache")))
+            .ok_or("Could not determine the cache directory (HOME is not set).")?;
+        let options = vulns::Online { cache, progress };
+        vulns::scan(&lockfiles, system, &options)
+    } else {
+        vulns::offline(&lockfiles, system)
+    };
+
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let report = vulns::VulnReport::new(timestamp, scan);
+    let exploited = report.scan.exploited();
+
+    let rendered = match format {
+        Format::Json => report.to_json(),
+        _ if cli.quiet => format!(
+            "{} findings, {} known-exploited",
+            report.scan.findings.len(),
+            exploited
+        ),
+        _ => report.to_text(),
+    };
+    match &cli.output {
+        Some(path) => {
+            std::fs::write(path, format!("{rendered}\n"))
+                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
+            if !cli.quiet {
+                eprintln!("Report written: {}", path.display());
+            }
+        }
+        None => println!("{rendered}"),
+    }
+
+    Ok(if exploited > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
 /// Determines the exit code, for use in scripts and CI.
 fn exit_code(cli: &Cli, config: &Config, report: &Report) -> ExitCode {
     // The threshold on the command line takes precedence over the one in the configuration.
@@ -518,7 +609,10 @@ mod tests {
         assert!(parse(&["--min-score", "101"]).is_err());
         assert!(parse(&["--unknown"]).is_err());
         assert!(parse(&["--fix", "--dry-run"]).is_ok());
-        assert!(parse(&["--online"]).is_err(), "--online only with --npm");
+        assert!(parse(&["--online"]).is_err(), "--online only with --npm or --vulns");
+        assert!(parse(&["--vulns", "--online", "--vulns-path", "a"]).is_ok());
+        assert!(parse(&["--vulns", "--npm"]).is_err());
+        assert!(parse(&["--vulns-path", "."]).is_err(), "--vulns-path only with --vulns");
         assert!(parse(&["--npm-path", "."]).is_err());
         assert!(parse(&["--npm", "--fix"]).is_err());
         assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());

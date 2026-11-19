@@ -12,6 +12,7 @@ mod supply_chain;
 mod system;
 
 use crate::config::Config;
+use crate::progress::Progress;
 use crate::runner::CommandRunner;
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -254,10 +255,33 @@ pub fn run_checks(
     runner: &dyn CommandRunner,
     config: &Config,
 ) -> Vec<CheckResult> {
+    run_checks_with(checks, runner, config, &Progress::none())
+}
+
+/// Like `run_checks`, reporting each check as it finishes.
+pub fn run_checks_with(
+    checks: &[Box<dyn Check>],
+    runner: &dyn CommandRunner,
+    config: &Config,
+    progress: &Progress,
+) -> Vec<CheckResult> {
+    progress.stage(format!("Running {} security checks", checks.len()));
+    // Checks finish in any order; the counter turns that into "n of total".
+    let finished = std::sync::atomic::AtomicUsize::new(0);
+    let finished = &finished;
+
     std::thread::scope(|scope| {
         let handles: Vec<_> = checks
             .iter()
-            .map(|check| scope.spawn(move || run_one(check.as_ref(), runner, config)))
+            .map(|check| {
+                scope.spawn(move || {
+                    let result = run_one(check.as_ref(), runner, config);
+                    let done = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    progress.step(done, checks.len());
+                    progress.note(format!("{:<8} {}", result.status.label(), result.name));
+                    result
+                })
+            })
             .collect();
 
         handles

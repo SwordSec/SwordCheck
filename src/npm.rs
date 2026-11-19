@@ -17,6 +17,7 @@
 //! The scan is read-only: only `package.json` files are read, and no package
 //! code is ever executed.
 
+use crate::progress::Progress;
 use crate::runner::CommandRunner;
 use colored::Colorize;
 use serde::Serialize;
@@ -153,7 +154,7 @@ impl Kind {
         self != Kind::Script
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Kind::Known => "MALICIOUS VERSION",
             Kind::Osv => "OSV RECORD",
@@ -234,9 +235,17 @@ impl Scan {
 
 /// Scans the given `node_modules` directories.
 pub fn scan(roots: &[PathBuf]) -> Scan {
+    scan_with(roots, &Progress::none())
+}
+
+/// Like `scan`, reporting each directory as it is finished.
+pub fn scan_with(roots: &[PathBuf], progress: &Progress) -> Scan {
+    progress.stage(format!("Inspecting {} node_modules directories", roots.len()));
     let mut scanner = Scanner::default();
-    for root in roots {
+    for (index, root) in roots.iter().enumerate() {
+        progress.note(format!("{} ({} packages so far)", root.display(), scanner.packages));
         scanner.node_modules(root, 0);
+        progress.step(index + 1, roots.len());
     }
 
     let findings = scanner
@@ -569,16 +578,25 @@ pub struct OsvHit {
 /// Queries OSV.dev about the installed packages. Only package names and
 /// versions are sent out; no file paths or contents are sent.
 pub fn osv_lookup(installed: &Installed) -> Result<Vec<OsvHit>, String> {
+    osv_lookup_with(installed, &Progress::none())
+}
+
+/// Like `osv_lookup`, reporting each batch.
+pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> Result<Vec<OsvHit>, String> {
     // Packages without a version (e.g. installed from git) cannot be queried.
     let packages: Vec<&(String, String)> = installed
         .keys()
         .filter(|(_, version)| !version.is_empty())
         .collect();
 
+    progress.stage(format!("Asking OSV.dev about {} package versions", packages.len()));
+    let batches = packages.len().div_ceil(OSV_BATCH);
     let mut hits = Vec::new();
-    for chunk in packages.chunks(OSV_BATCH) {
+    for (index, chunk) in packages.chunks(OSV_BATCH).enumerate() {
         let response = post_json(OSV_URL, &osv_request(chunk))?;
         hits.extend(parse_osv(&response, chunk)?);
+        progress.step(index + 1, batches);
+        progress.note(format!("{} malicious package records so far", hits.len()));
     }
     Ok(hits)
 }
@@ -639,7 +657,7 @@ fn parse_osv(response: &str, packages: &[&(String, String)]) -> Result<Vec<OsvHi
 /// Sends JSON with `curl`. The body is passed via stdin rather than as an
 /// argument: a request covering thousands of packages could exceed the
 /// command line length limit.
-fn post_json(url: &str, body: &str) -> Result<String, String> {
+pub(crate) fn post_json(url: &str, body: &str) -> Result<String, String> {
     let mut child = Command::new("curl")
         .args([
             "--silent",
