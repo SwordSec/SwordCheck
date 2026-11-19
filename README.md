@@ -14,6 +14,8 @@ cargo run -- --format html -o rapor.html
 cargo run -- --only filevault,sip # yalnızca seçili kontroller
 cargo run -- --min-score 80 -q    # CI: puan 80'in altındaysa çıkış kodu 1
 cargo run -- --fix --dry-run      # düzeltme komutlarını önizle
+cargo run -- --npm                # zararlı npm paketi taraması (genel + projeler)
+cargo run -- --npm --online       # ek olarak OSV.dev zararlı paket veritabanına sor
 cargo run -- --help
 ```
 
@@ -41,6 +43,7 @@ Testler: `cargo test`
 | `screen-lock` | Kilit sonrası parola isteme süresi | 10 | orta | elle |
 | `sudo` | Parolasız sudo (NOPASSWD) | 10 | yüksek | elle |
 | `launch-items` | Şüpheli LaunchAgent / LaunchDaemon öğeleri | 10 | orta | elle |
+| `npm-packages` | Genel kurulu npm paketlerinde zararlı sürüm / şüpheli betik | 15 | kritik | elle |
 
 ### Puanlama
 
@@ -104,6 +107,45 @@ sürüyorsa bildirilir.
 - FileVault, SIP, Gatekeeper gibi ayarlar yalnızca elle değiştirilebilir;
   bunlar için öneri gösterilir.
 
+## npm zararlı paket taraması (`--npm`)
+
+Ele geçirilmiş ya da baştan zararlı yayımlanmış npm paketlerini arar. Yalnızca
+`package.json` dosyalarını okur; hiçbir paket kodu çalıştırılmaz.
+
+| Bulgu | Anlamı | Kesinlik |
+| --- | --- | --- |
+| `ZARARLI SÜRÜM` | Ad + sürüm, gömülü olay listesiyle eşleşiyor (event-stream, ua-parser-js, chalk/debug, Nx, Shai-Hulud, axios…) | kesin |
+| `OSV KAYDI` | OSV.dev'de `MAL-` kaydı var (yalnızca `--online`) | kesin |
+| `İZ DOSYASI` | Paket dizininde bilinen bir solucanın dosyası var | kesin |
+| `ŞÜPHELİ BETİK` | `preinstall` / `install` / `postinstall` indirip çalıştırma, ters kabuk, kimlik bilgisi okuma gibi kalıplar içeriyor | sezgisel |
+
+İki kapsam vardır:
+
+- **Her denetimde** `npm-packages` kontrolü genel kurulum dizinlerine bakar
+  (npm, pnpm, yarn, bun, nvm / fnm / volta / asdf / mise ve `npx` önbelleği).
+  Hızlıdır; puana ve çıkış koduna etki eder.
+- **`--npm`** bunlara ek olarak ev dizinindeki tüm projelerin `node_modules`
+  dizinlerini tarar ve her bulguyu konumuyla listeler. macOS, terminalin
+  Belgeler / Masaüstü gibi klasörlere erişmesi için izin sorabilir.
+
+Seçenekler:
+
+- `--npm-path DİZİN` : yalnızca bu dizini (ya da altındaki `node_modules`
+  dizinlerini) tara; yinelenebilir
+- `--online` : kurulu paketlerin **ad ve sürümlerini** OSV.dev'e gönderip
+  zararlı paket kayıtlarını sorgular. Dosya yolu ya da içerik gönderilmez.
+  Gömülü liste zamanla eskir; güncel kapsam buradan gelir.
+- `--json`, `-o DOSYA`, `-q` bu modda da çalışır (markdown / html desteklenmez)
+
+Çıkış kodu, kesin bir zararlı paket bulunduysa 1'dir; sezgisel betik uyarıları
+kodu etkilemez. Bulgu çıkarsa: paketi kaldır ya da temiz sürüme geç,
+`node_modules`'ı silip yeniden kur ve o makinedeki npm / GitHub / bulut
+anahtarlarını yenile.
+
+Sınırlar: kilit dosyaları (`package-lock.json` vb.) tek başına taranmaz,
+yalnızca diske kurulmuş paketlere bakılır; sembolik bağlantılar (`npm link`)
+izlenmez; paket içindeki JavaScript kodu analiz edilmez.
+
 ## Pano (`--tui`)
 
 | Tuş | İşlev |
@@ -119,7 +161,8 @@ sürüyorsa bildirilir.
 | --- | --- |
 | `src/main.rs` | Komut satırı (`clap`) ve akış |
 | `src/checks/mod.rs` | `Check` trait'i, kayıt listesi, paralel çalıştırma |
-| `src/checks/{system,network,accounts,persistence}.rs` | Kontroller |
+| `src/checks/{system,network,accounts,persistence,supply_chain}.rs` | Kontroller |
+| `src/npm.rs` | npm paket taraması, olay listesi, OSV sorgusu |
 | `src/runner.rs` | Komut çalıştırma katmanı (`CommandRunner`) ve test sahtesi |
 | `src/config.rs` | `audit.toml` |
 | `src/score.rs` | Puan, not, özet |

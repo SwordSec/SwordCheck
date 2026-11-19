@@ -10,6 +10,7 @@
 //! - `score`   : puan ve not hesabı
 //! - `history` : önceki çalıştırmalarla karşılaştırma
 //! - `report`  : metin / JSON / Markdown / HTML çıktısı
+//! - `npm`     : zararlı npm paketi taraması (`--npm`)
 //! - `fix`     : onaylı düzeltme modu
 //! - `tui`     : etkileşimli pano
 
@@ -17,6 +18,7 @@ mod checks;
 mod config;
 mod fix;
 mod history;
+mod npm;
 mod report;
 mod runner;
 mod score;
@@ -110,6 +112,18 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["json", "output", "quiet"])]
     tui: bool,
 
+    /// Tüm npm paketlerini (genel + projeler) zararlı yazılıma karşı tara
+    #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history"])]
+    npm: bool,
+
+    /// --npm ile: yalnızca bu dizini tara (yinelenebilir)
+    #[arg(long, value_name = "DİZİN", requires = "npm")]
+    npm_path: Vec<PathBuf>,
+
+    /// --npm ile: paket ad ve sürümlerini OSV.dev zararlı paket veritabanına sor
+    #[arg(long, requires = "npm")]
+    online: bool,
+
     /// Yardımı göster
     #[arg(short = 'h', long, action = ArgAction::Help)]
     help: Option<bool>,
@@ -169,6 +183,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     });
     if checks.is_empty() {
         return Err("Çalıştırılacak kontrol kalmadı (--only / --skip seçimlerini gözden geçir).".to_string());
+    }
+
+    if cli.npm {
+        return run_npm(&cli);
     }
 
     let runner = SystemRunner::new();
@@ -240,6 +258,68 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     }
 
     Ok(exit_code(&cli, &config, &report))
+}
+
+/// `--npm`: kurulu npm paketlerini ayrıntılı tarar. Çıkış kodu, kesin bir
+/// zararlı paket bulunduysa 1'dir; sezgisel betik uyarıları kodu etkilemez.
+fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
+    let format = if cli.json { Format::Json } else { cli.format };
+    if !matches!(format, Format::Text | Format::Json) {
+        return Err("--npm yalnızca text ve json biçimlerini destekler.".to_string());
+    }
+
+    let roots = if cli.npm_path.is_empty() {
+        npm::all_roots(&SystemRunner::new())
+    } else {
+        let mut roots = Vec::new();
+        for path in &cli.npm_path {
+            if !path.is_dir() {
+                return Err(format!("{} bir dizin değil.", path.display()));
+            }
+            roots.extend(npm::roots_under(path));
+        }
+        roots
+    };
+
+    let mut scan = npm::scan(&roots);
+
+    // OSV'ye ulaşılamazsa yerel sonuçlar yine de gösterilir.
+    let mut online = false;
+    if cli.online {
+        match npm::osv_lookup(&scan.installed) {
+            Ok(hits) => {
+                scan.add_osv(hits);
+                online = true;
+            }
+            Err(err) => eprintln!("{} OSV sorgusu yapılamadı: {err}", "Uyarı:".yellow()),
+        }
+    }
+
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let report = npm::NpmReport::new(timestamp, online, scan);
+    let found_malware = report.scan.malware().next().is_some();
+
+    let rendered = match format {
+        Format::Json => report.to_json(),
+        _ if cli.quiet => format!(
+            "{} zararlı, {} şüpheli",
+            report.scan.malware().count(),
+            report.scan.suspicious().count()
+        ),
+        _ => report.to_text(),
+    };
+    match &cli.output {
+        Some(path) => {
+            std::fs::write(path, format!("{rendered}\n"))
+                .map_err(|err| format!("{} yazılamadı: {err}", path.display()))?;
+            if !cli.quiet {
+                eprintln!("Rapor yazıldı: {}", path.display());
+            }
+        }
+        None => println!("{rendered}"),
+    }
+
+    Ok(if found_malware { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 /// Betiklerde ve CI'da kullanılmak üzere çıkış kodunu belirler.
@@ -373,6 +453,10 @@ mod tests {
         assert!(parse(&["--min-score", "101"]).is_err());
         assert!(parse(&["--bilinmeyen"]).is_err());
         assert!(parse(&["--fix", "--dry-run"]).is_ok());
+        assert!(parse(&["--online"]).is_err(), "--online yalnızca --npm ile");
+        assert!(parse(&["--npm-path", "."]).is_err());
+        assert!(parse(&["--npm", "--fix"]).is_err());
+        assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());
     }
 
     #[test]
