@@ -8,6 +8,7 @@
 mod accounts;
 mod network;
 mod persistence;
+mod supply_chain;
 mod system;
 
 use crate::config::Config;
@@ -213,6 +214,7 @@ pub fn registry() -> Vec<Box<dyn Check>> {
         Box::new(accounts::ScreenLock),
         Box::new(accounts::SudoNoPassword),
         Box::new(persistence::LaunchItems),
+        Box::new(supply_chain::NpmPackages),
     ]
 }
 
@@ -369,8 +371,8 @@ tcp4       0      0  127.0.0.1.2222         *.*                    LISTEN";
         let runner = MockRunner::new();
         let config = Config::default();
         for result in run_checks(&registry(), &runner, &config) {
-            if result.id == "launch-items" {
-                continue; // Dosya sistemini okur; komutlara bağlı değildir.
+            if matches!(result.id, "launch-items" | "npm-packages") {
+                continue; // Dosya sistemini okurlar; komutlara bağlı değildirler.
             }
             assert_eq!(
                 result.status,
