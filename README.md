@@ -1,17 +1,26 @@
 # macOS Security Auditor
 
 A small, fast Rust CLI that audits the security settings of your Mac, scores
-them out of 100 and reports what to fix. It also scans for malicious npm
-packages and for API keys scattered across `.env` and config files.
+them out of 100 and reports what to fix. It also finds known vulnerabilities
+in your project dependencies, macOS and common apps, scans for malicious npm
+packages, and locates API keys scattered across `.env` and config files.
 
 The audit is **read-only**. The only path that changes anything on the system
 is `--fix`, which asks for confirmation before every command.
 
 ## Usage
 
+Run it without arguments to open the dashboard, pick a module and watch it
+work:
+
 ```sh
-cargo run                         # colored text report
-cargo run -- --tui                # interactive dashboard
+cargo run
+```
+
+Every module is also available as a flag, for scripts and CI:
+
+```sh
+cargo run -- --format text        # colored text report of the audit
 cargo run -- --json               # JSON output (scripts / CI)
 cargo run -- --format html -o report.html
 cargo run -- --only filevault,sip # run selected checks only
@@ -21,6 +30,8 @@ cargo run -- --npm                # malicious npm package scan (global + project
 cargo run -- --npm --online       # also query the OSV.dev malicious package database
 cargo run -- --secrets            # find API keys in .env and config files
 cargo run -- --secrets --secrets-path ~/project   # scan a single directory / file
+cargo run -- --vulns              # inventory of lockfiles, macOS and known apps (offline)
+cargo run -- --vulns --online     # look them up in OSV.dev, NVD, CISA KEV and EPSS
 cargo run -- --help
 ```
 
@@ -95,6 +106,43 @@ it never touches the network.
 
 Limits: secrets that only exist in git history (committed, then deleted) are
 not found, and keys are not checked for validity against the provider.
+
+## Vulnerability scan (`--vulns`)
+
+Lists the known vulnerabilities that affect the software on this machine and
+ranks them by how likely they are to be exploited.
+
+| What | Source | How it is matched |
+| --- | --- | --- |
+| Project dependencies | [OSV.dev](https://osv.dev) | Exact name + version from lockfiles |
+| macOS and common apps | [NVD](https://nvd.nist.gov) | Product name + installed version; only known-exploited CVEs are reported |
+| "Is it exploited in the wild?" | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | CVE id |
+| "How likely is exploitation?" | [EPSS](https://www.first.org/epss/) | CVE id |
+
+- **Lockfiles:** `Cargo.lock`, `package-lock.json`, `yarn.lock`,
+  `pnpm-lock.yaml`, `requirements*.txt` (pinned lines), `poetry.lock`,
+  `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`, `go.mod`, found
+  under your home directory. Dependency and build directories are skipped.
+- **Ranking:** known-exploited (KEV) and malware first, then EPSS probability,
+  then severity. The text report shows the top 25; `--json` has everything.
+- **Offline by default:** without `--online` only the inventory is printed.
+  With `--online`, package names and versions are sent to the services above;
+  file paths and contents never are.
+- **Cache:** responses are kept under `~/.macos-audit/cache` (advisories until
+  they change, KEV and NVD answers for a day).
+- **NVD rate limit:** without an API key the NVD allows 5 requests per 30
+  seconds, so the first run takes a few seconds per product. Set `NVD_API_KEY`
+  to speed it up.
+- **Options:** `--vulns-path PATH` scans only the lockfiles under a path (and
+  skips macOS and apps); `--json`, `-o FILE` and `-q` work as usual.
+- **Exit code:** 1 if a known-exploited vulnerability or malware is found,
+  0 otherwise.
+
+Limits: applications are matched through a built-in table of bundle ids, so
+apps that are not in the table are not checked; NVD matching depends on the
+vendor publishing version data and can miss or over-report; unpinned
+requirements (`flask>=2.0`) and git / path dependencies are ignored; Homebrew
+packages are not covered.
 
 ## npm malicious package scan (`--npm`)
 
@@ -186,14 +234,32 @@ the command, and you are told if the problem persists.
 - Settings such as FileVault, SIP and Gatekeeper can only be changed by hand;
   for those a recommendation is shown.
 
-## Dashboard (`--tui`)
+## Dashboard
+
+`macos-audit` with no arguments (or `--tui`) opens the dashboard when it runs
+in a terminal. When the output is piped or redirected, the plain audit report
+is printed instead, so existing scripts keep working.
+
+- **Home:** the four modules (security audit, vulnerability scan, npm malware
+  scan, secret scan) with a description of what each one reads and sends.
+  Online lookups are off until you press `o`.
+- **Running:** the current phase, a progress bar with a percentage when the
+  total is known (a moving bar when it is not), the step counter, elapsed
+  time and the most recent items being processed. `Esc` cancels.
+- **Results:** findings on the left, the selected finding's details on the
+  right, most urgent first.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` | Move between checks |
-| `g` / `G` | First / last check |
-| `r` | Re-run the audit |
-| `q` / `Esc` | Quit |
+| `↑` `↓` / `j` `k` | Move the selection |
+| `PgUp` `PgDn`, `g` / `G` | Jump; first / last row |
+| `Enter`, `1`–`4` | Run the selected module / run a module directly |
+| `o` | Turn online lookups on or off (home screen) |
+| `r` | Re-run the current module |
+| `Esc` | Back to the home screen (cancels a running scan) |
+| `q` | Quit |
+
+On the command line, `--vulns --online` prints the same phases to stderr.
 
 ## Code layout
 
@@ -203,6 +269,8 @@ the command, and you are told if the problem persists.
 | `src/checks/mod.rs` | The `Check` trait, the registry, parallel execution |
 | `src/checks/{system,network,accounts,persistence,supply_chain}.rs` | The checks |
 | `src/npm.rs` | npm package scan, incident list, OSV lookup |
+| `src/vulns.rs` | Vulnerability scan: OSV / NVD / KEV / EPSS lookups, ranking, report |
+| `src/lockfiles.rs` | Lockfile discovery and parsers |
 | `src/secrets.rs` | Secret scan: rules, file discovery, masking |
 | `src/runner.rs` | Command execution layer (`CommandRunner`) and its test mock |
 | `src/config.rs` | `audit.toml` |
@@ -210,7 +278,8 @@ the command, and you are told if the problem persists.
 | `src/history.rs` | History records and diffing |
 | `src/report.rs` | Text / JSON / Markdown / HTML |
 | `src/fix.rs` | Fix mode |
-| `src/tui.rs` | `ratatui` dashboard |
+| `src/tui.rs` | `ratatui` dashboard: home, progress and result screens |
+| `src/progress.rs` | Progress events shared by the dashboard and the command line |
 
 To add a check: define a type, implement the `Check` trait and add it to
 `checks::registry()`. Checks run commands through `CommandRunner`, so they can
