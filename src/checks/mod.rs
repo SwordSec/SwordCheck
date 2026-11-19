@@ -305,7 +305,10 @@ fn read_pref(runner: &dyn CommandRunner, domain: &str, key: &str) -> Pref {
     match runner.run("defaults", &["read", domain, key]) {
         Err(err) => Pref::Error(err),
         Ok(out) if out.success => Pref::Value(out.stdout),
-        Ok(out) if out.stderr.contains("does not exist") => Pref::Missing,
+        // Older macOS says "does not exist"; newer releases say "Could not find key".
+        Ok(out) if out.stderr.contains("does not exist") || out.stderr.contains("Could not find") => {
+            Pref::Missing
+        }
         Ok(out) => Pref::Error(out.combined()),
     }
 }
