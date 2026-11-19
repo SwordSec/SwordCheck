@@ -1,7 +1,7 @@
-//! Rapor üretimi: aynı veriden metin, JSON, Markdown ve HTML çıktısı.
+//! Report generation: text, JSON, Markdown and HTML output from the same data.
 //!
-//! Tüm biçimler önce bir `String` üretir; nereye yazılacağına (terminal ya
-//! da dosya) `main.rs` karar verir.
+//! Every format first produces a `String`; `main.rs` decides where it is
+//! written (terminal or file).
 
 use crate::checks::{CheckResult, Status};
 use crate::history::{Change, RunRecord};
@@ -9,10 +9,10 @@ use crate::score::{self, Summary};
 use clap::ValueEnum;
 use colored::{ColoredString, Colorize};
 use serde::Serialize;
-use std::fmt::Write as _; // `write!`/`writeln!` makrolarını String üzerinde kullanmak için
+use std::fmt::Write as _; // to use the `write!`/`writeln!` macros on a String
 
-/// Desteklenen çıktı biçimleri. `ValueEnum`, clap'in `--format json` gibi
-/// değerleri otomatik ayrıştırmasını sağlar.
+/// Supported output formats. `ValueEnum` lets clap parse values such as
+/// `--format json` automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Text,
@@ -21,14 +21,14 @@ pub enum Format {
     Html,
 }
 
-/// Önceki çalıştırmanın kısa özeti.
+/// Short summary of the previous run.
 #[derive(Debug, Serialize)]
 pub struct Previous {
     pub timestamp: String,
     pub score: u32,
 }
 
-/// Bir denetimin tüm verisi. JSON çıktısı doğrudan bu yapıdan türetilir.
+/// All the data of one audit. The JSON output is derived directly from this struct.
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub tool: &'static str,
@@ -44,7 +44,7 @@ pub struct Report {
 }
 
 impl Report {
-    /// Sonuçlardan rapor kurar; `previous` verilirse fark da hesaplanır.
+    /// Builds a report from the results; if `previous` is given, the diff is computed too.
     pub fn new(
         timestamp: String,
         os_version: String,
@@ -71,7 +71,7 @@ impl Report {
         }
     }
 
-    /// İstisna tanımlanmamış Fail/Warn kontroller.
+    /// Fail/Warn checks that have no exception defined.
     fn issues(&self) -> impl Iterator<Item = &CheckResult> {
         self.checks.iter().filter(|check| check.is_issue())
     }
@@ -87,8 +87,8 @@ impl Report {
     }
 
     fn to_json(&self) -> String {
-        // Bu yapıdaki tüm alanlar serileştirilebilir olduğu için hata beklenmez.
-        serde_json::to_string_pretty(self).expect("rapor JSON'a çevrilebilir")
+        // Every field in this struct is serializable, so no error is expected.
+        serde_json::to_string_pretty(self).expect("report can be converted to JSON")
     }
 
     fn to_text_quiet(&self) -> String {
@@ -99,12 +99,12 @@ impl Report {
         let mut out = String::new();
         let rule = "─".repeat(78).dimmed();
 
-        // String'e yazmak hata üretmez; `let _ =` ile sonucu bilinçli yok sayıyoruz.
+        // Writing to a String cannot fail; we deliberately ignore the result with `let _ =`.
         let _ = writeln!(out);
-        let _ = writeln!(out, "{}", " macOS Güvenlik Denetimi ".on_blue().white().bold());
+        let _ = writeln!(out, "{}", " macOS Security Audit ".on_blue().white().bold());
         let _ = writeln!(
             out,
-            " {} · {} · salt okunur denetim",
+            " {} · {} · read-only audit",
             self.os_version.dimmed(),
             short_time(&self.timestamp).dimmed()
         );
@@ -127,14 +127,14 @@ impl Report {
         let summary = &self.summary;
         let _ = write!(
             out,
-            "Puan: {score_text}  (Not: {})   {} geçti · {} uyarı · {} başarısız",
+            "Score: {score_text}  (Grade: {})   {} pass · {} warn · {} fail",
             self.grade, summary.pass, summary.warn, summary.fail
         );
         if summary.unknown > 0 {
-            let _ = write!(out, " · {} bilinmiyor", summary.unknown);
+            let _ = write!(out, " · {} unknown", summary.unknown);
         }
         if summary.exempt > 0 {
-            let _ = write!(out, " · {} istisna", summary.exempt);
+            let _ = write!(out, " · {} exempt", summary.exempt);
         }
         let _ = writeln!(out);
 
@@ -143,16 +143,16 @@ impl Report {
             let _ = writeln!(
                 out,
                 "{} {}",
-                "Önceki denetimden beri".bold(),
+                "Since the previous audit".bold(),
                 format!("({})", short_time(&previous.timestamp)).dimmed()
             );
             let delta = i64::from(self.score) - i64::from(previous.score);
             let trend = match delta {
-                0 => "değişmedi".dimmed(),
+                0 => "unchanged".dimmed(),
                 1.. => format!("+{delta}").green(),
                 _ => delta.to_string().red(),
             };
-            let _ = writeln!(out, "  Puan: {} → {} ({trend})", previous.score, self.score);
+            let _ = writeln!(out, "  Score: {} → {} ({trend})", previous.score, self.score);
             for change in &self.changes {
                 let arrow = if change.improved() {
                     "▲".green()
@@ -175,10 +175,10 @@ impl Report {
             let _ = writeln!(
                 out,
                 "{}",
-                "Harika! Denetlenen tüm önlemler yerinde.".green()
+                "Great! All audited safeguards are in place.".green()
             );
         } else {
-            let _ = writeln!(out, "{}", "Öneriler".bold());
+            let _ = writeln!(out, "{}", "Recommendations".bold());
             for issue in issues {
                 let _ = writeln!(
                     out,
@@ -194,7 +194,7 @@ impl Report {
                 let _ = writeln!(
                     out,
                     "{}",
-                    "Bazı sorunlar otomatik düzeltilebilir: `macos-audit --fix --dry-run` ile önizle."
+                    "Some issues can be fixed automatically: preview with `macos-audit --fix --dry-run`."
                         .dimmed()
                 );
             }
@@ -204,7 +204,7 @@ impl Report {
         let _ = write!(
             out,
             "{}",
-            "Not: Bu araç yalnızca yerel yapılandırmayı denetler; kapsamlı bir güvenlik taraması değildir."
+            "Note: This tool only audits local configuration; it is not a comprehensive security scan."
                 .dimmed()
         );
         out
@@ -212,18 +212,18 @@ impl Report {
 
     fn to_markdown(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "# macOS Güvenlik Denetimi");
+        let _ = writeln!(out, "# macOS Security Audit");
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "**Puan: {}/100 (Not: {})** · {} · {}",
+            "**Score: {}/100 (Grade: {})** · {} · {}",
             self.score,
             self.grade,
             self.os_version,
             short_time(&self.timestamp)
         );
         let _ = writeln!(out);
-        let _ = writeln!(out, "| Durum | Kontrol | Önem | CIS | Ayrıntı |");
+        let _ = writeln!(out, "| Status | Check | Severity | CIS | Detail |");
         let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
         for check in &self.checks {
             let _ = writeln!(
@@ -239,11 +239,11 @@ impl Report {
 
         if let Some(previous) = &self.previous {
             let _ = writeln!(out);
-            let _ = writeln!(out, "## Önceki denetimden beri");
+            let _ = writeln!(out, "## Since the previous audit");
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Puan: {} → {} (önceki: {})",
+                "Score: {} → {} (previous: {})",
                 previous.score,
                 self.score,
                 short_time(&previous.timestamp)
@@ -262,7 +262,7 @@ impl Report {
         let issues: Vec<&CheckResult> = self.issues().collect();
         if !issues.is_empty() {
             let _ = writeln!(out);
-            let _ = writeln!(out, "## Öneriler");
+            let _ = writeln!(out, "## Recommendations");
             let _ = writeln!(out);
             for issue in issues {
                 let _ = writeln!(out, "- **{}**: {}", issue.name, issue.advice);
@@ -302,7 +302,7 @@ impl Report {
             );
         }
         let advice = if advice.is_empty() {
-            "<p>Denetlenen tüm önlemler yerinde.</p>".to_string()
+            "<p>All audited safeguards are in place.</p>".to_string()
         } else {
             format!("<ul>\n{advice}</ul>")
         };
@@ -311,7 +311,7 @@ impl Report {
         if let Some(previous) = &self.previous {
             let _ = writeln!(
                 trend,
-                "<h2>Önceki denetimden beri</h2>\n<p>Puan: {} → {} (önceki: {})</p>\n<ul>",
+                "<h2>Since the previous audit</h2>\n<p>Score: {} → {} (previous: {})</p>\n<ul>",
                 previous.score,
                 self.score,
                 escape_html(&short_time(&previous.timestamp))
@@ -336,11 +336,11 @@ impl Report {
 
         format!(
             r#"<!doctype html>
-<html lang="tr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>macOS Güvenlik Denetimi</title>
+<title>macOS Security Audit</title>
 <style>
   :root {{ --bg:#f6f7f9; --card:#fff; --text:#1c2330; --muted:#667085; --line:#e4e7ec;
           --pass:#16794c; --warn:#b26a00; --fail:#c0352b; --unknown:#667085; }}
@@ -368,20 +368,20 @@ impl Report {
 </head>
 <body>
 <main>
-<h1>macOS Güvenlik Denetimi</h1>
-<div class="muted">{os} · {time} · salt okunur denetim</div>
-<div class="score"><strong class="{score_class}">{score}</strong><span>/ 100 · Not: {grade}</span>
-<span class="muted">{pass} geçti · {warn} uyarı · {fail} başarısız · {unknown} bilinmiyor · {exempt} istisna</span></div>
+<h1>macOS Security Audit</h1>
+<div class="muted">{os} · {time} · read-only audit</div>
+<div class="score"><strong class="{score_class}">{score}</strong><span>/ 100 · Grade: {grade}</span>
+<span class="muted">{pass} pass · {warn} warn · {fail} fail · {unknown} unknown · {exempt} exempt</span></div>
 <div class="card">
 <table>
-<thead><tr><th>Durum</th><th>Kontrol</th><th>Önem</th><th>CIS</th><th>Ayrıntı</th></tr></thead>
+<thead><tr><th>Status</th><th>Check</th><th>Severity</th><th>CIS</th><th>Detail</th></tr></thead>
 <tbody>
 {rows}</tbody>
 </table>
 </div>
-{trend}<h2>Öneriler</h2>
+{trend}<h2>Recommendations</h2>
 {advice}
-<p class="muted">Bu araç yalnızca yerel yapılandırmayı denetler; kapsamlı bir güvenlik taraması değildir.</p>
+<p class="muted">This tool only audits local configuration; it is not a comprehensive security scan.</p>
 </main>
 </body>
 </html>
@@ -399,7 +399,7 @@ impl Report {
     }
 }
 
-/// Tek bir kontrolün renkli ve hizalı metin satırı.
+/// The colored, aligned text line for a single check.
 pub fn text_line(check: &CheckResult) -> String {
     let (icon, paint): (&str, fn(&str) -> ColoredString) = match (&check.exempt, check.status) {
         (Some(_), _) => ("○", |text| text.dimmed()),
@@ -409,8 +409,8 @@ pub fn text_line(check: &CheckResult) -> String {
         (None, Status::Unknown) => ("?", |text| text.dimmed()),
     };
 
-    // Etiketi önce düz metin olarak hizalayıp sonra renklendiriyoruz:
-    // ANSI renk kodları genişliğe dahil olmadığı için hizalama bozulmasın.
+    // We pad the label as plain text first and color it afterwards: ANSI
+    // color codes do not count toward the width, so alignment stays intact.
     let label = format!("{:<12}", format!("[{}]", status_label(check)));
     format!(
         "{} {} {:<32} {}",
@@ -421,10 +421,10 @@ pub fn text_line(check: &CheckResult) -> String {
     )
 }
 
-/// İstisnalı kontroller için "İSTİSNA", diğerleri için durum etiketi.
+/// "EXCEPTION" for exempted checks, the status label for the rest.
 fn status_label(check: &CheckResult) -> &'static str {
     if check.exempt.is_some() {
-        "İSTİSNA"
+        "EXCEPTION"
     } else {
         check.status.label()
     }
@@ -432,25 +432,25 @@ fn status_label(check: &CheckResult) -> &'static str {
 
 fn detail_with_exemption(check: &CheckResult) -> String {
     match &check.exempt {
-        Some(reason) => format!("{} (istisna: {reason})", check.detail),
+        Some(reason) => format!("{} (exception: {reason})", check.detail),
         None => check.detail.clone(),
     }
 }
 
-/// "önem: yüksek, CIS 2.2.1" gibi kısa bilgi.
+/// Short info such as "severity: high, CIS 2.2.1".
 pub fn meta(check: &CheckResult) -> String {
     match check.cis {
-        Some(cis) => format!("önem: {}, CIS {cis}", check.severity.label()),
-        None => format!("önem: {}", check.severity.label()),
+        Some(cis) => format!("severity: {}, CIS {cis}", check.severity.label()),
+        None => format!("severity: {}", check.severity.label()),
     }
 }
 
-/// RFC 3339 zaman damgasını "2026-11-10 14:05" biçimine kısaltır.
+/// Shortens an RFC 3339 timestamp to the form "2026-11-10 14:05".
 pub fn short_time(timestamp: &str) -> String {
     timestamp.chars().take(16).collect::<String>().replace('T', " ")
 }
 
-/// HTML'e gömülecek metindeki özel karakterleri kaçışlar.
+/// Escapes special characters in text that will be embedded in HTML.
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -471,7 +471,7 @@ mod tests {
         let previous = RunRecord::new("2026-11-01T09:00:00+03:00".into(), "macOS 26".into(), 50, &before);
 
         let mut exempt = result("ssh", Status::Warn, 10);
-        exempt.exempt = Some("bilerek açık".into());
+        exempt.exempt = Some("enabled on purpose".into());
         let now = vec![
             result("firewall", Status::Pass, 20),
             result("sip", Status::Fail, 20),
@@ -486,37 +486,37 @@ mod tests {
     }
 
     #[test]
-    fn rapor_ozeti_dogru() {
+    fn report_summary_is_correct() {
         let report = sample();
         assert_eq!(report.score, 50);
         assert_eq!(report.grade, "D");
         assert_eq!(report.changes.len(), 2);
         assert_eq!(report.previous.as_ref().unwrap().score, 50);
-        assert_eq!(report.issues().count(), 1, "istisnalı kontrol sorun sayılmaz");
+        assert_eq!(report.issues().count(), 1, "an exempted check does not count as an issue");
     }
 
     #[test]
-    fn json_gecerli_ve_alanlar_yerinde() {
+    fn json_is_valid_and_fields_are_present() {
         let json: serde_json::Value = serde_json::from_str(&sample().to_json()).unwrap();
         assert_eq!(json["score"], 50);
         assert_eq!(json["summary"]["exempt"], 1);
         assert_eq!(json["checks"][0]["id"], "firewall");
         assert_eq!(json["checks"][0]["status"], "pass");
-        assert_eq!(json["checks"][2]["exempt"], "bilerek açık");
+        assert_eq!(json["checks"][2]["exempt"], "enabled on purpose");
         assert_eq!(json["changes"][0]["from"], "fail");
     }
 
     #[test]
-    fn markdown_tablo_ve_oneriler() {
+    fn markdown_table_and_recommendations() {
         let markdown = sample().to_markdown();
-        assert!(markdown.contains("**Puan: 50/100 (Not: D)**"));
-        assert!(markdown.contains("| BAŞARISIZ | sip |"));
-        assert!(markdown.contains("| İSTİSNA | ssh |"));
-        assert!(markdown.contains("## Öneriler"));
+        assert!(markdown.contains("**Score: 50/100 (Grade: D)**"));
+        assert!(markdown.contains("| FAIL | sip |"));
+        assert!(markdown.contains("| EXCEPTION | ssh |"));
+        assert!(markdown.contains("## Recommendations"));
     }
 
     #[test]
-    fn html_ozel_karakterleri_kacislar() {
+    fn html_escapes_special_characters() {
         assert_eq!(
             escape_html("<b>\"a\" & b</b>"),
             "&lt;b&gt;&quot;a&quot; &amp; b&lt;/b&gt;"
@@ -527,12 +527,12 @@ mod tests {
     }
 
     #[test]
-    fn sessiz_metin_tek_satir() {
+    fn quiet_text_is_a_single_line() {
         assert_eq!(sample().render(Format::Text, true), "50/100 (D)");
     }
 
     #[test]
-    fn zaman_kisaltma() {
+    fn shortens_timestamp() {
         assert_eq!(short_time("2026-11-10T14:05:00+03:00"), "2026-11-10 14:05");
     }
 }

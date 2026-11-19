@@ -1,113 +1,163 @@
-# macOS Güvenlik Denetçisi
+# macOS Security Auditor
 
-Rust öğrenme projesi: yerel macOS güvenlik ayarlarını denetler, 100 üzerinden
-puanlar ve raporlar. Denetim **salt okunurdur**; sistemde değişiklik yapan tek
-yol, her komut için onay isteyen `--fix` modudur.
+A small, fast Rust CLI that audits the security settings of your Mac, scores
+them out of 100 and reports what to fix. It also scans for malicious npm
+packages and for API keys scattered across `.env` and config files.
 
-## Çalıştırma
+The audit is **read-only**. The only path that changes anything on the system
+is `--fix`, which asks for confirmation before every command.
+
+## Usage
 
 ```sh
-cargo run                         # renkli metin raporu
-cargo run -- --tui                # etkileşimli pano
-cargo run -- --json               # JSON çıktısı (betikler / CI için)
-cargo run -- --format html -o rapor.html
-cargo run -- --only filevault,sip # yalnızca seçili kontroller
-cargo run -- --min-score 80 -q    # CI: puan 80'in altındaysa çıkış kodu 1
-cargo run -- --fix --dry-run      # düzeltme komutlarını önizle
-cargo run -- --npm                # zararlı npm paketi taraması (genel + projeler)
-cargo run -- --npm --online       # ek olarak OSV.dev zararlı paket veritabanına sor
-cargo run -- --secrets            # .env ve yapılandırma dosyalarında API anahtarı ara
-cargo run -- --secrets --secrets-path ~/proje   # yalnızca bir dizini / dosyayı tara
+cargo run                         # colored text report
+cargo run -- --tui                # interactive dashboard
+cargo run -- --json               # JSON output (scripts / CI)
+cargo run -- --format html -o report.html
+cargo run -- --only filevault,sip # run selected checks only
+cargo run -- --min-score 80 -q    # CI: exit code 1 if the score is below 80
+cargo run -- --fix --dry-run      # preview fix commands
+cargo run -- --npm                # malicious npm package scan (global + projects)
+cargo run -- --npm --online       # also query the OSV.dev malicious package database
+cargo run -- --secrets            # find API keys in .env and config files
+cargo run -- --secrets --secrets-path ~/project   # scan a single directory / file
 cargo run -- --help
 ```
 
-Testler: `cargo test`
+Tests: `cargo test`
 
-## Kontroller
+## Checks
 
-`cargo run -- --list` güncel listeyi kimlik, ağırlık ve CIS bölümüyle gösterir.
+`cargo run -- --list` prints the current list with id, weight and CIS section.
 
-| Kimlik | Kontrol | Ağırlık | Önem | `--fix` |
+| Id | Check | Weight | Severity | `--fix` |
 | --- | --- | --- | --- | --- |
-| `filevault` | FileVault disk şifrelemesi | 25 | kritik | elle |
-| `sip` | Sistem Bütünlüğü Koruması | 20 | kritik | elle |
-| `gatekeeper` | Gatekeeper | 15 | yüksek | elle |
-| `auto-update` | Otomatik güncellemeler | 10 | yüksek | var |
-| `pending-updates` | Bekleyen güncellemeler | 10 | orta | elle |
-| `xprotect` | XProtect imzalarının güncelliği | 5 | orta | elle |
-| `firewall` | Uygulama güvenlik duvarı | 20 | yüksek | var |
-| `stealth` | Güvenlik duvarı gizli modu | 5 | düşük | var |
-| `ssh` | Uzak giriş (port 22) | 10 | orta | var |
-| `sharing` | Ekran / dosya paylaşımı, uzaktan yönetim | 10 | orta | elle |
-| `airdrop` | AirDrop görünürlüğü | 5 | düşük | elle |
-| `auto-login` | Otomatik giriş | 10 | yüksek | var |
-| `guest` | Misafir hesabı | 5 | orta | var |
-| `screen-lock` | Kilit sonrası parola isteme süresi | 10 | orta | elle |
-| `sudo` | Parolasız sudo (NOPASSWD) | 10 | yüksek | elle |
-| `launch-items` | Şüpheli LaunchAgent / LaunchDaemon öğeleri | 10 | orta | elle |
-| `npm-packages` | Genel kurulu npm paketlerinde zararlı sürüm / şüpheli betik | 15 | kritik | elle |
+| `filevault` | FileVault (disk encryption) | 25 | critical | manual |
+| `sip` | System Integrity Protection (SIP) | 20 | critical | manual |
+| `gatekeeper` | Gatekeeper | 15 | high | manual |
+| `auto-update` | Automatic updates | 10 | high | yes |
+| `pending-updates` | Pending updates | 10 | medium | manual |
+| `xprotect` | XProtect signatures | 5 | medium | manual |
+| `firewall` | Firewall | 20 | high | yes |
+| `stealth` | Firewall stealth mode | 5 | low | yes |
+| `ssh` | Remote Login (SSH) | 10 | medium | yes |
+| `sharing` | Sharing services | 10 | medium | manual |
+| `airdrop` | AirDrop visibility | 5 | low | manual |
+| `auto-login` | Automatic login | 10 | high | yes |
+| `guest` | Guest account | 5 | medium | yes |
+| `screen-lock` | Screen lock password | 10 | medium | manual |
+| `sudo` | Passwordless sudo | 10 | high | manual |
+| `launch-items` | Launch items | 10 | medium | manual |
+| `npm-packages` | Malicious npm packages | 15 | critical | manual |
 
-### Puanlama
+### Scoring
 
-- `Pass` tam puan, `Warn` yarım puan, `Fail` sıfır puan.
-- Durumu tespit edilemeyen (`Unknown`) ve istisna tanımlanan kontroller
-  paydaya dahil edilmez.
-- Not: 90+ A, 75+ B, 60+ C, 40+ D, altı F.
+- `Pass` earns full weight, `Warn` half, `Fail` none.
+- Checks whose state cannot be determined (`Unknown`) and checks with an
+  exception are left out of the denominator.
+- Grades: 90+ A, 75+ B, 60+ C, 40+ D, below that F.
 
-### Çıkış kodu
+### Exit code
 
-| Kod | Anlam |
+| Code | Meaning |
 | --- | --- |
-| 0 | Başarısız kontrol yok ve puan eşiğin üzerinde |
-| 1 | En az bir kontrol başarısız ya da puan `--min-score` altında |
-| 2 | Kullanım ya da yapılandırma hatası |
+| 0 | No failed check and the score is above the threshold |
+| 1 | At least one check failed, or the score is below `--min-score` |
+| 2 | Usage or configuration error |
 
-## Secret taraması (`--secrets`)
+## Secret scan (`--secrets`)
 
-Bu makinede hangi API anahtarının hangi dosyada durduğunu özetler. Salt
-okunurdur ve ağa çıkmaz.
+Summarizes which API keys live in which files on this machine. Read-only, and
+it never touches the network.
 
-- **Bakılan yerler:** ev dizini altındaki projelerde `.env*`, `*.env`,
+- **Where it looks:** in projects under your home directory: `.env*`, `*.env`,
   `*.tfstate`, `*.tfvars`, `*.pem`, `*.key`, `credentials.json`, `secrets.*`,
-  `.mcp.json`, `.git/config`; ayrıca `~/.aws/credentials`, `~/.npmrc`,
-  `~/.netrc`, `~/.docker/config.json`, `~/.kube/config`, kabuk geçmişi ve rc
-  dosyaları, `~/.ssh`, Claude / Cursor / VS Code ayarları.
-- **Atlananlar:** `node_modules`, `target`, `vendor`, `testdata` gibi bağımlılık
-  ve derleme dizinleri, gizli dizinler, `~/Library`, `~/go/pkg`.
-- **Kalıplar:** Anthropic, OpenAI, OpenRouter, AWS, Google, DigitalOcean,
+  `.mcp.json`, `.git/config`. In addition: `~/.aws/credentials`, `~/.npmrc`,
+  `~/.netrc`, `~/.docker/config.json`, `~/.kube/config`, shell history and rc
+  files, `~/.ssh`, and Claude / Cursor / VS Code settings.
+- **What it skips:** dependency and build directories such as `node_modules`,
+  `target`, `vendor` and `testdata`, hidden directories, `~/Library`,
+  `~/go/pkg`.
+- **Patterns:** Anthropic, OpenAI, OpenRouter, AWS, Google, DigitalOcean,
   GitHub, GitLab, Slack, Stripe, SendGrid, Twilio, npm, Hugging Face, Groq,
-  Telegram, JWT, URL içindeki parolalar, parolasız özel anahtarlar. Bunlara ek
-  olarak adı `SECRET` / `TOKEN` / `PASSWORD` / `API_KEY` içeren ve değeri
-  rastgele görünen atamalar "Genel" başlığında raporlanır (sezgisel).
-- **Şablon dosyalar** (`.env.example` vb.): yalnızca gerçek anahtar kalıpları
-  aranır; uydurma parolalar raporlanmaz.
-- **Maskeleme:** ham değer hiçbir çıktıya yazılmaz. Aynı anahtarın farklı
-  dosyalardaki kopyaları `secret_id` ile eşleştirilir.
-- **İşaretler:** dosya git'te izleniyorsa `GIT'TE İZLENİYOR`, grup / diğer
-  kullanıcılar okuyabiliyorsa `izin 644`.
-- **Çıkış kodu:** git'te izlenen bir dosyada anahtar varsa 1, yoksa 0.
-- Yalnızca `text` ve `json` biçimleri desteklenir.
+  Telegram, JWTs, passwords embedded in URLs and unencrypted private keys. On
+  top of that, assignments whose name contains `SECRET` / `TOKEN` / `PASSWORD`
+  / `API_KEY` and whose value looks random are reported under "Generic"
+  (heuristic).
+- **Template files** (`.env.example` etc.): only real key patterns are
+  matched; made-up passwords are not reported.
+- **Masking:** raw values are never written to any output. Copies of the same
+  key in different files are linked through `secret_id`.
+- **Flags:** `TRACKED IN GIT` when the file is tracked by a git repository,
+  `mode 644` when group / other users can read it.
+- **Exit code:** 1 if a secret sits in a git-tracked file, 0 otherwise.
+- Only the `text` and `json` formats are supported.
 
-## Çıktı biçimleri
+Limits: secrets that only exist in git history (committed, then deleted) are
+not found, and keys are not checked for validity against the provider.
 
-`--format text|json|markdown|html` (ya da kısaca `--json`). `-o DOSYA` raporu
-dosyaya yazar. JSON çıktısı puanı, özeti, her kontrolün ayrıntısını, önceki
-çalıştırmayı ve değişen kontrolleri içerir.
+## npm malicious package scan (`--npm`)
 
-## Geçmiş ve karşılaştırma
+Looks for npm packages that were hijacked or published as malware in the first
+place. Only `package.json` files are read; no package code is ever executed.
 
-Her tam denetim `~/.macos-audit/history.json` dosyasına kaydedilir (son 100
-kayıt). Sonraki çalıştırmada puan farkı ve durumu değişen kontroller gösterilir.
+| Finding | Meaning | Confidence |
+| --- | --- | --- |
+| `MALICIOUS VERSION` | Name + version match the built-in incident list (event-stream, ua-parser-js, chalk/debug, Nx, Shai-Hulud, axios…) | certain |
+| `OSV RECORD` | OSV.dev has a `MAL-` record (only with `--online`) | certain |
+| `IOC FILE` | The package directory contains a file dropped by a known worm | certain |
+| `SUSPICIOUS SCRIPT` | `preinstall` / `install` / `postinstall` contains patterns such as download-and-execute, reverse shells or credential reads | heuristic |
 
-- `--history` : geçmiş denetimleri listeler
-- `--no-history` : kaydetmez ve karşılaştırmaz
-- `--only` / `--skip` ile yapılan kısmi çalıştırmalar kaydedilmez
-- `MACOS_AUDIT_HOME` ortam değişkeni kayıt dizinini değiştirir
+There are two scopes:
 
-## Yapılandırma (`audit.toml`)
+- **Every audit** runs the `npm-packages` check against global install
+  directories (npm, pnpm, yarn, bun, nvm / fnm / volta / asdf / mise and the
+  `npx` cache). It is fast and affects the score and exit code.
+- **`--npm`** additionally scans the `node_modules` directories of every
+  project under your home directory and lists each finding with its location.
+  macOS may ask for permission to let the terminal access folders such as
+  Documents and Desktop.
 
-Sırayla `--config DOSYA`, `./audit.toml`, `~/.config/macos-audit/audit.toml`
-aranır. Örnek için [`audit.example.toml`](audit.example.toml):
+Options:
+
+- `--npm-path DIR` : scan only this directory (or the `node_modules`
+  directories below it); repeatable
+- `--online` : sends the **names and versions** of installed packages to
+  OSV.dev and looks up malicious package records. No file paths or contents
+  are sent. The built-in list ages; up-to-date coverage comes from here.
+- `--json`, `-o FILE` and `-q` work in this mode too (markdown / html are not
+  supported)
+
+The exit code is 1 when a confirmed malicious package is found; heuristic
+script warnings do not affect it. If something turns up: remove the package or
+move to a clean version, delete and reinstall `node_modules`, and rotate the
+npm / GitHub / cloud credentials on that machine.
+
+Limits: lockfiles (`package-lock.json` etc.) are not scanned on their own,
+only packages installed on disk; symlinks (`npm link`) are not followed; the
+JavaScript inside packages is not analyzed.
+
+## Output formats
+
+`--format text|json|markdown|html` (or `--json` for short). `-o FILE` writes
+the report to a file. The JSON output contains the score, the summary, the
+details of every check, the previous run and the checks that changed.
+
+## History and comparison
+
+Every full audit is saved to `~/.macos-audit/history.json` (last 100 runs).
+The next run shows the score difference and the checks whose status changed.
+
+- `--history` : list past audits
+- `--no-history` : do not save or compare
+- Partial runs with `--only` / `--skip` are not saved
+- The `MACOS_AUDIT_HOME` environment variable changes the storage directory
+
+## Configuration (`audit.toml`)
+
+Looked up in this order: `--config FILE`, `./audit.toml`,
+`~/.config/macos-audit/audit.toml`. See
+[`audit.example.toml`](audit.example.toml) for an example:
 
 ```toml
 min_score = 80
@@ -117,98 +167,61 @@ skip = ["airdrop"]
 filevault = 40
 
 [exceptions]
-ssh = "Geliştirme makinesi; SSH bilerek açık"
+ssh = "Development machine; SSH is enabled on purpose"
 ```
 
-İstisnalı kontrol çalışır ve raporda `İSTİSNA` olarak görünür ama puana ve
-çıkış koduna etki etmez. Bilinmeyen kimlikler ve alanlar hata verir.
+A check with an exception still runs and shows up in the report as
+`EXCEPTION`, but it does not affect the score or the exit code. Unknown ids and
+fields are errors.
 
-## Düzeltme modu (`--fix`)
+## Fix mode (`--fix`)
 
-Otomatik düzeltmesi olan her sorun için çalıştırılacak komutu gösterir ve tek
-tek onay ister (`e`/`evet`). Komuttan sonra kontrol yeniden çalıştırılır; sorun
-sürüyorsa bildirilir.
+For every problem that has an automatic fix, shows the command that would run
+and asks for confirmation one by one (`y`/`yes`). The check is re-run after
+the command, and you are told if the problem persists.
 
-- `--fix --dry-run` : komutları yalnızca gösterir, hiçbir şey çalıştırmaz
-- `--fix --yes` : onay sormadan uygular
-- Komutların çoğu `sudo` gerektirir; parola doğrudan `sudo` tarafından sorulur.
-- FileVault, SIP, Gatekeeper gibi ayarlar yalnızca elle değiştirilebilir;
-  bunlar için öneri gösterilir.
+- `--fix --dry-run` : only show the commands, run nothing
+- `--fix --yes` : apply without asking
+- Most commands need `sudo`; the password is prompted by `sudo` itself.
+- Settings such as FileVault, SIP and Gatekeeper can only be changed by hand;
+  for those a recommendation is shown.
 
-## npm zararlı paket taraması (`--npm`)
+## Dashboard (`--tui`)
 
-Ele geçirilmiş ya da baştan zararlı yayımlanmış npm paketlerini arar. Yalnızca
-`package.json` dosyalarını okur; hiçbir paket kodu çalıştırılmaz.
-
-| Bulgu | Anlamı | Kesinlik |
-| --- | --- | --- |
-| `ZARARLI SÜRÜM` | Ad + sürüm, gömülü olay listesiyle eşleşiyor (event-stream, ua-parser-js, chalk/debug, Nx, Shai-Hulud, axios…) | kesin |
-| `OSV KAYDI` | OSV.dev'de `MAL-` kaydı var (yalnızca `--online`) | kesin |
-| `İZ DOSYASI` | Paket dizininde bilinen bir solucanın dosyası var | kesin |
-| `ŞÜPHELİ BETİK` | `preinstall` / `install` / `postinstall` indirip çalıştırma, ters kabuk, kimlik bilgisi okuma gibi kalıplar içeriyor | sezgisel |
-
-İki kapsam vardır:
-
-- **Her denetimde** `npm-packages` kontrolü genel kurulum dizinlerine bakar
-  (npm, pnpm, yarn, bun, nvm / fnm / volta / asdf / mise ve `npx` önbelleği).
-  Hızlıdır; puana ve çıkış koduna etki eder.
-- **`--npm`** bunlara ek olarak ev dizinindeki tüm projelerin `node_modules`
-  dizinlerini tarar ve her bulguyu konumuyla listeler. macOS, terminalin
-  Belgeler / Masaüstü gibi klasörlere erişmesi için izin sorabilir.
-
-Seçenekler:
-
-- `--npm-path DİZİN` : yalnızca bu dizini (ya da altındaki `node_modules`
-  dizinlerini) tara; yinelenebilir
-- `--online` : kurulu paketlerin **ad ve sürümlerini** OSV.dev'e gönderip
-  zararlı paket kayıtlarını sorgular. Dosya yolu ya da içerik gönderilmez.
-  Gömülü liste zamanla eskir; güncel kapsam buradan gelir.
-- `--json`, `-o DOSYA`, `-q` bu modda da çalışır (markdown / html desteklenmez)
-
-Çıkış kodu, kesin bir zararlı paket bulunduysa 1'dir; sezgisel betik uyarıları
-kodu etkilemez. Bulgu çıkarsa: paketi kaldır ya da temiz sürüme geç,
-`node_modules`'ı silip yeniden kur ve o makinedeki npm / GitHub / bulut
-anahtarlarını yenile.
-
-Sınırlar: kilit dosyaları (`package-lock.json` vb.) tek başına taranmaz,
-yalnızca diske kurulmuş paketlere bakılır; sembolik bağlantılar (`npm link`)
-izlenmez; paket içindeki JavaScript kodu analiz edilmez.
-
-## Pano (`--tui`)
-
-| Tuş | İşlev |
+| Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` | Kontroller arasında gezin |
-| `g` / `G` | İlk / son kontrol |
-| `r` | Denetimi yeniden çalıştır |
-| `q` / `Esc` | Çık |
+| `↑` `↓` / `j` `k` | Move between checks |
+| `g` / `G` | First / last check |
+| `r` | Re-run the audit |
+| `q` / `Esc` | Quit |
 
-## Kod yapısı
+## Code layout
 
-| Dosya | İçerik |
+| File | Contents |
 | --- | --- |
-| `src/main.rs` | Komut satırı (`clap`) ve akış |
-| `src/checks/mod.rs` | `Check` trait'i, kayıt listesi, paralel çalıştırma |
-| `src/checks/{system,network,accounts,persistence,supply_chain}.rs` | Kontroller |
-| `src/npm.rs` | npm paket taraması, olay listesi, OSV sorgusu |
-| `src/runner.rs` | Komut çalıştırma katmanı (`CommandRunner`) ve test sahtesi |
+| `src/main.rs` | Command line (`clap`) and control flow |
+| `src/checks/mod.rs` | The `Check` trait, the registry, parallel execution |
+| `src/checks/{system,network,accounts,persistence,supply_chain}.rs` | The checks |
+| `src/npm.rs` | npm package scan, incident list, OSV lookup |
+| `src/secrets.rs` | Secret scan: rules, file discovery, masking |
+| `src/runner.rs` | Command execution layer (`CommandRunner`) and its test mock |
 | `src/config.rs` | `audit.toml` |
-| `src/score.rs` | Puan, not, özet |
-| `src/history.rs` | Geçmiş kaydı ve fark |
-| `src/report.rs` | Metin / JSON / Markdown / HTML |
-| `src/fix.rs` | Düzeltme modu |
-| `src/tui.rs` | `ratatui` panosu |
+| `src/score.rs` | Score, grade, summary |
+| `src/history.rs` | History records and diffing |
+| `src/report.rs` | Text / JSON / Markdown / HTML |
+| `src/fix.rs` | Fix mode |
+| `src/tui.rs` | `ratatui` dashboard |
 
-Yeni kontrol eklemek için: bir tip tanımla, `Check` trait'ini uygula ve
-`checks::registry()` listesine ekle. Kontroller komutları `CommandRunner`
-üzerinden çalıştırdığı için `MockRunner` ile sahte çıktılarla test edilebilir.
+To add a check: define a type, implement the `Check` trait and add it to
+`checks::registry()`. Checks run commands through `CommandRunner`, so they can
+be tested against canned output with `MockRunner`.
 
-## Notlar
+## Notes
 
-- CIS sütunu, CIS Apple macOS Benchmark'taki ilgili bölümü gösterir. Bölüm
-  numaraları benchmark sürümüne göre değişir; uyumluluk raporunda kullanmadan
-  önce elindeki sürümle karşılaştır.
-- `launch-items` basit sezgisel kurallar kullanır (geçici ya da gizli dizinden
-  çalışan program, indirip çalıştırma vb.); uyarı kesin hüküm değildir.
-- Bu araç kapsamlı bir güvenlik taraması değildir; temel yapılandırma
-  kontrollerini gösteren eğitici bir örnektir.
+- The CIS column refers to the matching section of the CIS Apple macOS
+  Benchmark. Section numbers change between benchmark versions; compare with
+  the version you use before relying on them in a compliance report.
+- `launch-items` uses simple heuristics (programs running from temporary or
+  hidden directories, download-and-execute, etc.); a warning is not a verdict.
+- This tool covers baseline configuration checks. It is not a replacement for
+  a full security assessment.

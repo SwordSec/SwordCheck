@@ -2,7 +2,7 @@
 name = "macos-audit"
 version = "0.1.0"
 edition = "2024"
-description = "Yerel macOS güvenlik ayarlarını denetleyen küçük bir CLI aracı"
+description = "A small CLI tool that audits local macOS security settings"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

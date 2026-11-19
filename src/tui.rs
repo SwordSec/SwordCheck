@@ -1,7 +1,8 @@
-//! Etkileşimli terminal panosu (`--tui`).
+//! Interactive terminal dashboard (`--tui`).
 //!
-//! `ratatui` "immediate mode" çalışır: her karede tüm ekranı `App`
-//! durumundan yeniden çizeriz. Durumu değiştiren tek şey tuş olaylarıdır.
+//! `ratatui` works in "immediate mode": on every frame we redraw the whole
+//! screen from the `App` state. Key events are the only thing that changes
+//! the state.
 
 use crate::checks::{self, Check, CheckResult, Status};
 use crate::config::Config;
@@ -15,11 +16,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-/// Panonun tüm durumu.
+/// The entire state of the dashboard.
 pub struct App {
     os_version: String,
     results: Vec<CheckResult>,
-    /// Listede seçili satır.
+    /// The selected row in the list.
     list: ListState,
 }
 
@@ -40,7 +41,7 @@ impl App {
         self.results.get(self.list.selected()?)
     }
 
-    /// Seçimi `delta` kadar kaydırır; liste sınırlarında durur.
+    /// Moves the selection by `delta`; stops at the list bounds.
     fn move_selection(&mut self, delta: isize) {
         if self.results.is_empty() {
             return;
@@ -59,14 +60,14 @@ impl App {
         self.move_selection(isize::MAX);
     }
 
-    /// Yeni sonuçları yerleştirir; seçili satırı korur.
+    /// Installs the new results; keeps the selected row.
     fn replace_results(&mut self, results: Vec<CheckResult>) {
         self.results = results;
         self.move_selection(0);
     }
 }
 
-/// Panoyu başlatır ve kullanıcı çıkana kadar çalıştırır.
+/// Starts the dashboard and runs it until the user quits.
 pub fn run(
     checks: &[Box<dyn Check>],
     config: &Config,
@@ -75,8 +76,9 @@ pub fn run(
 ) -> std::io::Result<()> {
     let mut app = App::new(os_version, results);
 
-    // `init` terminali ham moda alıp alternatif ekrana geçer; `restore`
-    // hata olsa bile eski haline döndürmek için döngüden sonra çağrılır.
+    // `init` puts the terminal in raw mode and switches to the alternate
+    // screen; `restore` is called after the loop so the terminal is put back
+    // even if there was an error.
     let mut terminal = ratatui::init();
     let outcome = event_loop(&mut terminal, &mut app, checks, config);
     ratatui::restore();
@@ -92,8 +94,8 @@ fn event_loop(
     loop {
         terminal.draw(|frame| draw(frame, app))?;
 
-        // Bir olay gelene kadar bekler. Yalnızca tuşa basma olaylarını
-        // işliyoruz (bazı terminaller bırakma olayı da gönderir).
+        // Blocks until an event arrives. We only handle key press events
+        // (some terminals also send release events).
         let Event::Key(key) = event::read()? else {
             continue;
         };
@@ -108,7 +110,7 @@ fn event_loop(
             KeyCode::Home | KeyCode::Char('g') => app.select_first(),
             KeyCode::End | KeyCode::Char('G') => app.select_last(),
             KeyCode::Char('r') => {
-                // Yeni runner: önbellek boş, komutlar yeniden çalışır.
+                // New runner: the cache is empty, commands run again.
                 let results = checks::run_checks(checks, &SystemRunner::new(), config);
                 app.replace_results(results);
             }
@@ -117,8 +119,8 @@ fn event_loop(
     }
 }
 
-/// Tek bir kareyi çizer. Olay döngüsünden ayrı tutulduğu için testlerde
-/// sahte bir terminale (`TestBackend`) çizilip içeriği doğrulanabilir.
+/// Draws a single frame. Because it is kept separate from the event loop,
+/// tests can draw it to a fake terminal (`TestBackend`) and verify the content.
 fn draw(frame: &mut Frame, app: &mut App) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
@@ -136,11 +138,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     let help = Line::from(vec![
         Span::styled(" ↑↓/jk ", Style::new().fg(Color::Cyan)),
-        Span::raw("gezin  "),
+        Span::raw("navigate  "),
         Span::styled("r ", Style::new().fg(Color::Cyan)),
-        Span::raw("yeniden denetle  "),
+        Span::raw("re-run audit  "),
         Span::styled("q ", Style::new().fg(Color::Cyan)),
-        Span::raw("çık"),
+        Span::raw("quit"),
     ]);
     frame.render_widget(Paragraph::new(help), footer);
 }
@@ -155,18 +157,18 @@ fn draw_score(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let title = format!(
-        " macOS Güvenlik Denetimi · {} · {} geçti, {} uyarı, {} başarısız ",
+        " macOS Security Audit · {} · {} pass, {} warn, {} fail ",
         app.os_version, summary.pass, summary.warn, summary.fail
     );
     let gauge = Gauge::default()
         .block(Block::bordered().title(title))
         .gauge_style(Style::new().fg(color))
         .percent(score.min(100) as u16)
-        .label(format!("{score}/100 (Not: {})", score::grade(score)));
+        .label(format!("{score}/100 (Grade: {})", score::grade(score)));
     frame.render_widget(gauge, area);
 }
 
-/// Duruma göre simge ve renk.
+/// Icon and color for a status.
 fn status_style(result: &CheckResult) -> (&'static str, Color) {
     match (&result.exempt, result.status) {
         (Some(_), _) => ("○", Color::DarkGray),
@@ -191,17 +193,17 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::bordered().title(" Kontroller "))
+        .block(Block::bordered().title(" Checks "))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
-    // Seçili satırı ve kaydırma konumunu `ListState` tutar.
+    // `ListState` holds the selected row and the scroll position.
     frame.render_stateful_widget(list, area, &mut app.list);
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" Ayrıntı ");
+    let block = Block::bordered().title(" Detail ");
     let Some(result) = app.selected() else {
-        frame.render_widget(Paragraph::new("Gösterilecek kontrol yok.").block(block), area);
+        frame.render_widget(Paragraph::new("No checks to show.").block(block), area);
         return;
     };
 
@@ -210,7 +212,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     let dim = Style::new().fg(Color::DarkGray);
 
     let status = if result.exempt.is_some() {
-        "İSTİSNA"
+        "EXCEPTION"
     } else {
         result.status.label()
     };
@@ -220,7 +222,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(status, Style::new().fg(color).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("  ·  {}  ·  ağırlık {}", report::meta(result), result.weight),
+                format!("  ·  {}  ·  weight {}", report::meta(result), result.weight),
                 dim,
             ),
         ]),
@@ -230,24 +232,24 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(reason) = &result.exempt {
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled("İstisna gerekçesi", bold)));
+        lines.push(Line::from(Span::styled("Exception reason", bold)));
         lines.push(Line::from(reason.as_str()));
     }
     if result.is_issue() && !result.advice.is_empty() {
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled("Öneri", bold)));
+        lines.push(Line::from(Span::styled("Advice", bold)));
         lines.push(Line::from(result.advice));
     }
     if let (true, Some(fix)) = (result.is_issue(), result.fix) {
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled("Düzeltme komutu (--fix)", bold)));
+        lines.push(Line::from(Span::styled("Fix command (--fix)", bold)));
         lines.push(Line::from(Span::styled(
             fix.command_line(),
             Style::new().fg(Color::Cyan),
         )));
     }
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(format!("kimlik: {}", result.id), dim)));
+    lines.push(Line::from(Span::styled(format!("id: {}", result.id), dim)));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -273,7 +275,7 @@ mod tests {
         )
     }
 
-    /// Kareyi sahte bir terminale çizip ekrandaki metni döndürür.
+    /// Draws the frame to a fake terminal and returns the on-screen text.
     fn render(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
@@ -287,17 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn secim_sinirlarda_durur() {
+    fn selection_stops_at_bounds() {
         let mut app = app();
         assert_eq!(app.list.selected(), Some(0));
 
         app.move_selection(-1);
-        assert_eq!(app.list.selected(), Some(0), "ilk satırdan yukarı çıkmaz");
+        assert_eq!(app.list.selected(), Some(0), "does not go above the first row");
 
         app.move_selection(1);
         app.move_selection(1);
         app.move_selection(1);
-        assert_eq!(app.list.selected(), Some(2), "son satırdan aşağı inmez");
+        assert_eq!(app.list.selected(), Some(2), "does not go below the last row");
 
         app.select_first();
         assert_eq!(app.list.selected(), Some(0));
@@ -306,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn sonuclar_azalinca_secim_gecerli_kalir() {
+    fn selection_stays_valid_when_results_shrink() {
         let mut app = app();
         app.select_last();
         app.replace_results(vec![result("firewall", Status::Pass, 20)]);
@@ -315,26 +317,26 @@ mod tests {
     }
 
     #[test]
-    fn bos_listede_panic_etmez() {
+    fn empty_list_does_not_panic() {
         let mut app = App::new("macOS".into(), Vec::new());
         app.move_selection(1);
         assert!(app.selected().is_none());
-        assert!(render(&mut app).contains("Gösterilecek kontrol yok."));
+        assert!(render(&mut app).contains("No checks to show."));
     }
 
     #[test]
-    fn kare_puani_listeyi_ve_ayrintiyi_gosterir() {
+    fn frame_shows_score_list_and_detail() {
         let mut app = app();
-        app.move_selection(1); // filevault (başarısız) seçili
+        app.move_selection(1); // filevault (failing) is selected
 
         let screen = render(&mut app);
-        // 20 tam + 0 + 5 yarım = 25 / 55 → %45
-        assert!(screen.contains("45/100 (Not: D)"), "{screen}");
-        assert!(screen.contains("Kontroller"));
+        // 20 full + 0 + 5 half = 25 / 55 → 45%
+        assert!(screen.contains("45/100 (Grade: D)"), "{screen}");
+        assert!(screen.contains("Checks"));
         assert!(screen.contains("✘ filevault"));
-        assert!(screen.contains("BAŞARISIZ"));
-        assert!(screen.contains("filevault ayrıntısı"));
-        assert!(screen.contains("Öneri"));
-        assert!(screen.contains("yeniden denetle"));
+        assert!(screen.contains("FAIL"));
+        assert!(screen.contains("filevault detail"));
+        assert!(screen.contains("Advice"));
+        assert!(screen.contains("re-run audit"));
     }
 }

@@ -1,11 +1,11 @@
-//! Hesap ve oturum kontrolleri: otomatik giriş, misafir, ekran kilidi, sudo.
+//! Account and session checks: automatic login, guest, screen lock, sudo.
 
 use super::{Check, Fix, Outcome, Pref, Severity, read_pref};
 use crate::runner::CommandRunner;
 
 const LOGIN_WINDOW: &str = "/Library/Preferences/com.apple.loginwindow";
 
-/// Parolasız otomatik giriş yapılandırılmış mı?
+/// Is passwordless automatic login configured?
 pub struct AutoLogin;
 
 impl Check for AutoLogin {
@@ -13,7 +13,7 @@ impl Check for AutoLogin {
         "auto-login"
     }
     fn name(&self) -> &'static str {
-        "Otomatik giriş"
+        "Automatic login"
     }
     fn weight(&self) -> u32 {
         10
@@ -34,19 +34,19 @@ impl Check for AutoLogin {
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match read_pref(runner, LOGIN_WINDOW, "autoLoginUser") {
-            // Anahtar varsa bir kullanıcı adı döner: otomatik giriş açık.
+            // If the key exists a user name is returned: automatic login is on.
             Pref::Value(user) if !user.is_empty() => Outcome::fail(
-                format!("'{user}' kullanıcısı parolasız otomatik giriş yapıyor."),
-                "Sistem Ayarları > Kullanıcılar ve Gruplar > Otomatik girişi kapat.",
+                format!("User '{user}' logs in automatically without a password."),
+                "Turn off automatic login in System Settings > Users & Groups.",
             ),
-            // Anahtar yoksa otomatik giriş zaten kapalıdır.
-            Pref::Value(_) | Pref::Missing => Outcome::pass("Otomatik giriş kapalı."),
+            // If the key is missing, automatic login is already off.
+            Pref::Value(_) | Pref::Missing => Outcome::pass("Automatic login is off."),
             Pref::Error(err) => Outcome::unknown(err),
         }
     }
 }
 
-/// Misafir hesabı açık mı?
+/// Is the guest account enabled?
 pub struct GuestAccount;
 
 impl Check for GuestAccount {
@@ -54,7 +54,7 @@ impl Check for GuestAccount {
         "guest"
     }
     fn name(&self) -> &'static str {
-        "Misafir hesabı"
+        "Guest account"
     }
     fn weight(&self) -> u32 {
         5
@@ -76,22 +76,22 @@ impl Check for GuestAccount {
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match read_pref(runner, LOGIN_WINDOW, "GuestEnabled") {
             Pref::Value(value) if value == "1" => Outcome::fail(
-                "Misafir hesabı açık.",
-                "Sistem Ayarları > Kullanıcılar ve Gruplar > Misafir Kullanıcı'yı kapat.",
+                "The guest account is enabled.",
+                "Turn off Guest User in System Settings > Users & Groups.",
             ),
-            Pref::Value(_) | Pref::Missing => Outcome::pass("Misafir hesabı kapalı."),
+            Pref::Value(_) | Pref::Missing => Outcome::pass("The guest account is disabled."),
             Pref::Error(err) => Outcome::unknown(err),
         }
     }
 }
 
-/// Ekran kilitlendikten sonra parola ne kadar sürede isteniyor?
+/// How soon is the password required after the screen locks?
 pub struct ScreenLock;
 
-/// Kilit gecikmesi bu saniyeden uzunsa uyarı veririz.
+/// We warn if the lock delay is longer than this many seconds.
 const MAX_LOCK_DELAY_SECS: u64 = 5;
 
-/// `sysadminctl -screenLock status` çıktısının yorumu.
+/// The interpretation of the `sysadminctl -screenLock status` output.
 #[derive(Debug, PartialEq, Eq)]
 enum LockDelay {
     Immediate,
@@ -99,7 +99,7 @@ enum LockDelay {
     Off,
 }
 
-/// Olası çıktılar:
+/// Possible outputs:
 /// - "screenLock delay is immediate"
 /// - "screenLock delay is 300 seconds"
 /// - "screenLock is off"
@@ -107,8 +107,8 @@ fn parse_lock_delay(output: &str) -> Option<LockDelay> {
     if output.contains("screenLock is off") {
         return Some(LockDelay::Off);
     }
-    // `split_once` metni ilk eşleşmede ikiye böler; `?` eşleşme yoksa
-    // fonksiyondan `None` ile çıkar.
+    // `split_once` splits the text in two at the first match; `?` exits the
+    // function with `None` if there is no match.
     let (_, rest) = output.split_once("screenLock delay is ")?;
     let mut words = rest.split_whitespace();
     match words.next()? {
@@ -122,7 +122,7 @@ impl Check for ScreenLock {
         "screen-lock"
     }
     fn name(&self) -> &'static str {
-        "Ekran kilidi parolası"
+        "Screen lock password"
     }
     fn weight(&self) -> u32 {
         10
@@ -135,33 +135,37 @@ impl Check for ScreenLock {
     }
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
-        const ADVICE: &str = "Sistem Ayarları > Kilitli Ekran'da parola isteme süresini \"Hemen\" yap.";
+        const ADVICE: &str = "Set the require-password delay to \"Immediately\" in System Settings > Lock Screen.";
 
-        // `sysadminctl` bilgiyi stderr'e yazdığı için birleşik çıktıya bakıyoruz.
+        // `sysadminctl` writes its information to stderr, so we look at the combined output.
         let output = match runner.run("sysadminctl", &["-screenLock", "status"]) {
             Ok(out) => out.combined(),
             Err(err) => return Outcome::unknown(err),
         };
 
         match parse_lock_delay(&output) {
-            Some(LockDelay::Immediate) => Outcome::pass("Kilit sonrası parola hemen isteniyor."),
+            Some(LockDelay::Immediate) => {
+                Outcome::pass("The password is required immediately after locking.")
+            }
             Some(LockDelay::Seconds(secs)) if secs <= MAX_LOCK_DELAY_SECS => {
-                Outcome::pass(format!("Parola {secs} saniye sonra isteniyor."))
+                Outcome::pass(format!("The password is required after {secs} seconds."))
             }
             Some(LockDelay::Seconds(secs)) => Outcome::warn(
-                format!("Parola kilitten {secs} saniye sonra isteniyor."),
+                format!("The password is required {secs} seconds after locking."),
                 ADVICE,
             ),
-            Some(LockDelay::Off) => Outcome::fail("Ekran kilidi parola istemiyor.", ADVICE),
-            None => Outcome::unknown("Ekran kilidi durumu okunamadı."),
+            Some(LockDelay::Off) => {
+                Outcome::fail("The screen lock does not require a password.", ADVICE)
+            }
+            None => Outcome::unknown("The screen lock state could not be read."),
         }
     }
 }
 
-/// Kullanıcı sudo'yu parolasız çalıştırabiliyor mu?
+/// Can the user run sudo without a password?
 ///
-/// `sudo -n -l` hiçbir komut çalıştırmaz; yalnızca kullanıcının sudo
-/// kurallarını listeler. `-n` parola sorulmasını engeller.
+/// `sudo -n -l` does not run any command; it only lists the user's sudo
+/// rules. `-n` prevents a password prompt.
 pub struct SudoNoPassword;
 
 impl Check for SudoNoPassword {
@@ -169,7 +173,7 @@ impl Check for SudoNoPassword {
         "sudo"
     }
     fn name(&self) -> &'static str {
-        "Parolasız sudo"
+        "Passwordless sudo"
     }
     fn weight(&self) -> u32 {
         10
@@ -187,15 +191,15 @@ impl Check for SudoNoPassword {
 
         if text.contains("NOPASSWD") {
             Outcome::fail(
-                "sudo kurallarında NOPASSWD var: komutlar parolasız çalışabiliyor.",
-                "`sudo visudo` ile /etc/sudoers ve /etc/sudoers.d içindeki NOPASSWD kurallarını kaldır.",
+                "The sudo rules contain NOPASSWD: commands can run without a password.",
+                "Remove the NOPASSWD rules in /etc/sudoers and /etc/sudoers.d with `sudo visudo`.",
             )
         } else if text.contains("password is required") {
-            Outcome::pass("sudo parola istiyor.")
+            Outcome::pass("sudo requires a password.")
         } else if out.success {
-            // Liste parolasız geldi ama NOPASSWD yok: yakın zamanda girilen
-            // parola hâlâ önbellekte demektir.
-            Outcome::pass("NOPASSWD kuralı yok (sudo oturumu önbellekte).")
+            // The list came back without a password but there is no NOPASSWD:
+            // that means a recently entered password is still cached.
+            Outcome::pass("No NOPASSWD rule (sudo session is cached).")
         } else {
             Outcome::unknown(text)
         }
@@ -211,23 +215,23 @@ mod tests {
     const MISSING: &str = "The domain/default pair of (x, y) does not exist";
 
     #[test]
-    fn otomatik_giris() {
+    fn automatic_login() {
         let cmd = format!("defaults read {LOGIN_WINDOW} autoLoginUser");
 
-        let on = MockRunner::new().ok(&cmd, "ayse");
+        let on = MockRunner::new().ok(&cmd, "alice");
         let outcome = AutoLogin.run(&on);
         assert_eq!(outcome.status, Status::Fail);
-        assert!(outcome.detail.contains("ayse"));
+        assert!(outcome.detail.contains("alice"));
 
         let off = MockRunner::new().fail(&cmd, MISSING);
         assert_eq!(AutoLogin.run(&off).status, Status::Pass);
 
-        let broken = MockRunner::new().fail(&cmd, "izin reddedildi");
+        let broken = MockRunner::new().fail(&cmd, "permission denied");
         assert_eq!(AutoLogin.run(&broken).status, Status::Unknown);
     }
 
     #[test]
-    fn misafir_hesabi() {
+    fn guest_account() {
         let cmd = format!("defaults read {LOGIN_WINDOW} GuestEnabled");
         assert_eq!(
             GuestAccount.run(&MockRunner::new().ok(&cmd, "1")).status,
@@ -240,8 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn kilit_gecikmesi_ayristirma() {
-        // Gerçek çıktı tarih ve süreç bilgisiyle başlar.
+    fn lock_delay_parsing() {
+        // The real output starts with date and process information.
         let line = "2026-11-10 00:25:54.846 sysadminctl[73455:795705] screenLock delay is immediate";
         assert_eq!(parse_lock_delay(line), Some(LockDelay::Immediate));
         assert_eq!(
@@ -249,11 +253,11 @@ mod tests {
             Some(LockDelay::Seconds(300))
         );
         assert_eq!(parse_lock_delay("screenLock is off"), Some(LockDelay::Off));
-        assert_eq!(parse_lock_delay("anlamsız çıktı"), None);
+        assert_eq!(parse_lock_delay("nonsense output"), None);
     }
 
     #[test]
-    fn ekran_kilidi_durumlari() {
+    fn screen_lock_states() {
         let cmd = "sysadminctl -screenLock status";
         let status = |text: &str| ScreenLock.run(&MockRunner::new().ok_stderr(cmd, text)).status;
 
@@ -264,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn sudo_kurallari() {
+    fn sudo_rules() {
         let cmd = "sudo -n -l";
 
         let asks = MockRunner::new().fail(cmd, "sudo: a password is required");

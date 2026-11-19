@@ -1,11 +1,11 @@
-//! Ağ kontrolleri: güvenlik duvarı, uzak giriş ve paylaşım servisleri.
+//! Network checks: firewall, remote login and sharing services.
 
 use super::{Check, Fix, Outcome, Pref, Severity, listening_on, netstat, read_pref, stdout_of};
 use crate::runner::CommandRunner;
 
 const FIREWALL_TOOL: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 
-/// Uygulama güvenlik duvarı açık mı?
+/// Is the application firewall on?
 pub struct Firewall;
 
 impl Check for Firewall {
@@ -13,7 +13,7 @@ impl Check for Firewall {
         "firewall"
     }
     fn name(&self) -> &'static str {
-        "Güvenlik duvarı"
+        "Firewall"
     }
     fn weight(&self) -> u32 {
         20
@@ -34,20 +34,20 @@ impl Check for Firewall {
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match stdout_of(runner, FIREWALL_TOOL, &["--getglobalstate"]) {
-            // Çıktı: "Firewall is enabled. (State = 1)"
+            // Output: "Firewall is enabled. (State = 1)"
             Ok(out) if out.contains("is enabled") => {
-                Outcome::pass("Uygulama güvenlik duvarı açık.")
+                Outcome::pass("The application firewall is on.")
             }
             Ok(_) => Outcome::fail(
-                "Uygulama güvenlik duvarı kapalı.",
-                "Sistem Ayarları > Ağ > Güvenlik Duvarı bölümünden aç.",
+                "The application firewall is off.",
+                "Turn it on in System Settings > Network > Firewall.",
             ),
             Err(err) => Outcome::unknown(err),
         }
     }
 }
 
-/// Güvenlik duvarı gizli modu (ping ve port taramalarına yanıt vermeme) açık mı?
+/// Is the firewall's stealth mode (not responding to pings and port scans) on?
 pub struct StealthMode;
 
 impl Check for StealthMode {
@@ -55,7 +55,7 @@ impl Check for StealthMode {
         "stealth"
     }
     fn name(&self) -> &'static str {
-        "Güvenlik duvarı gizli modu"
+        "Firewall stealth mode"
     }
     fn weight(&self) -> u32 {
         5
@@ -76,24 +76,24 @@ impl Check for StealthMode {
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match stdout_of(runner, FIREWALL_TOOL, &["--getstealthmode"]) {
-            Ok(out) if stealth_enabled(&out) => Outcome::pass("Gizli mod açık."),
+            Ok(out) if stealth_enabled(&out) => Outcome::pass("Stealth mode is on."),
             Ok(_) => Outcome::warn(
-                "Gizli mod kapalı.",
-                "Sistem Ayarları > Ağ > Güvenlik Duvarı > Seçenekler'den gizli modu aç.",
+                "Stealth mode is off.",
+                "Turn on stealth mode in System Settings > Network > Firewall > Options.",
             ),
             Err(err) => Outcome::unknown(err),
         }
     }
 }
 
-/// macOS sürümüne göre çıktı "Firewall stealth mode is on" ya da
-/// "Stealth mode enabled" biçiminde olabilir.
+/// Depending on the macOS version the output may be either
+/// "Firewall stealth mode is on" or "Stealth mode enabled".
 fn stealth_enabled(output: &str) -> bool {
     let output = output.to_lowercase();
     output.contains("is on") || (output.contains("enabled") && !output.contains("disabled"))
 }
 
-/// 22 numaralı TCP portu (SSH) dinleniyor mu?
+/// Is TCP port 22 (SSH) being listened on?
 pub struct Ssh;
 
 impl Check for Ssh {
@@ -101,7 +101,7 @@ impl Check for Ssh {
         "ssh"
     }
     fn name(&self) -> &'static str {
-        "Uzak giriş (SSH)"
+        "Remote Login (SSH)"
     }
     fn weight(&self) -> u32 {
         10
@@ -123,24 +123,24 @@ impl Check for Ssh {
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match netstat(runner) {
             Ok(out) if listening_on(&out, 22) => Outcome::warn(
-                "22 numaralı port dinleniyor (SSH açık).",
-                "İhtiyacın yoksa Sistem Ayarları > Genel > Paylaşım > Uzak Giriş'i kapat.",
+                "Port 22 is listening (SSH is on).",
+                "If you don't need it, turn off Remote Login in System Settings > General > Sharing.",
             ),
-            Ok(_) => Outcome::pass("22 numaralı port dinlenmiyor."),
+            Ok(_) => Outcome::pass("Port 22 is not listening."),
             Err(err) => Outcome::unknown(err),
         }
     }
 }
 
-/// Ekran/dosya paylaşımı gibi servisler ağa açık mı?
+/// Are services such as screen/file sharing exposed to the network?
 pub struct Sharing;
 
-/// (port, servis adı)
+/// (port, service name)
 const SHARING_PORTS: [(u16, &str); 4] = [
-    (5900, "Ekran Paylaşımı (5900)"),
-    (445, "Dosya Paylaşımı/SMB (445)"),
-    (548, "Dosya Paylaşımı/AFP (548)"),
-    (3283, "Uzaktan Yönetim (3283)"),
+    (5900, "Screen Sharing (5900)"),
+    (445, "File Sharing/SMB (445)"),
+    (548, "File Sharing/AFP (548)"),
+    (3283, "Remote Management (3283)"),
 ];
 
 impl Check for Sharing {
@@ -148,7 +148,7 @@ impl Check for Sharing {
         "sharing"
     }
     fn name(&self) -> &'static str {
-        "Paylaşım servisleri"
+        "Sharing services"
     }
     fn weight(&self) -> u32 {
         10
@@ -170,11 +170,11 @@ impl Check for Sharing {
                     .collect();
 
                 if open.is_empty() {
-                    Outcome::pass("Ekran ve dosya paylaşımı kapalı.")
+                    Outcome::pass("Screen and file sharing are off.")
                 } else {
                     Outcome::warn(
-                        format!("Açık servisler: {}.", open.join(", ")),
-                        "Kullanmadığın servisleri Sistem Ayarları > Genel > Paylaşım'dan kapat.",
+                        format!("Open services: {}.", open.join(", ")),
+                        "Turn off the services you don't use in System Settings > General > Sharing.",
                     )
                 }
             }
@@ -183,7 +183,7 @@ impl Check for Sharing {
     }
 }
 
-/// AirDrop herkese açık mı?
+/// Is AirDrop open to everyone?
 pub struct AirDrop;
 
 impl Check for AirDrop {
@@ -191,7 +191,7 @@ impl Check for AirDrop {
         "airdrop"
     }
     fn name(&self) -> &'static str {
-        "AirDrop görünürlüğü"
+        "AirDrop visibility"
     }
     fn weight(&self) -> u32 {
         5
@@ -206,11 +206,11 @@ impl Check for AirDrop {
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match read_pref(runner, "com.apple.sharingd", "DiscoverableMode") {
             Pref::Value(mode) if mode == "Everyone" => Outcome::warn(
-                "AirDrop herkese açık.",
-                "Sistem Ayarları > Genel > AirDrop ve Handoff'tan \"Yalnızca Kişiler\" seç.",
+                "AirDrop is open to everyone.",
+                "Choose \"Contacts Only\" in System Settings > General > AirDrop & Handoff.",
             ),
-            Pref::Value(mode) => Outcome::pass(format!("AirDrop modu: {mode}.")),
-            Pref::Missing => Outcome::unknown("AirDrop ayarı bulunamadı."),
+            Pref::Value(mode) => Outcome::pass(format!("AirDrop mode: {mode}.")),
+            Pref::Missing => Outcome::unknown("The AirDrop setting was not found."),
             Pref::Error(err) => Outcome::unknown(err),
         }
     }
@@ -225,7 +225,7 @@ mod tests {
     const NETSTAT: &str = "netstat -an -p tcp";
 
     #[test]
-    fn gizli_mod_ciktilari() {
+    fn stealth_mode_outputs() {
         assert!(stealth_enabled("Firewall stealth mode is on"));
         assert!(stealth_enabled("Stealth mode enabled"));
         assert!(!stealth_enabled("Firewall stealth mode is off"));
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn guvenlik_duvari_kapaliyken_basarisiz() {
+    fn fails_when_firewall_is_off() {
         let cmd = format!("{FIREWALL_TOOL} --getglobalstate");
         let off = MockRunner::new().ok(&cmd, "Firewall is disabled. (State = 0)");
         assert_eq!(Firewall.run(&off).status, Status::Fail);
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_ve_paylasim_portlari() {
+    fn ssh_and_sharing_ports() {
         let runner = MockRunner::new().ok(
             NETSTAT,
             "tcp4  0  0  *.22    *.*  LISTEN\n\
@@ -254,19 +254,19 @@ mod tests {
 
         let sharing = Sharing.run(&runner);
         assert_eq!(sharing.status, Status::Warn);
-        assert!(sharing.detail.contains("Ekran Paylaşımı"));
+        assert!(sharing.detail.contains("Screen Sharing"));
         assert!(!sharing.detail.contains("SMB"));
     }
 
     #[test]
-    fn portlar_kapaliyken_gecer() {
+    fn passes_when_ports_are_closed() {
         let runner = MockRunner::new().ok(NETSTAT, "tcp4  0  0  127.0.0.1.5000  *.*  LISTEN");
         assert_eq!(Ssh.run(&runner).status, Status::Pass);
         assert_eq!(Sharing.run(&runner).status, Status::Pass);
     }
 
     #[test]
-    fn airdrop_modlari() {
+    fn airdrop_modes() {
         let cmd = "defaults read com.apple.sharingd DiscoverableMode";
         let everyone = MockRunner::new().ok(cmd, "Everyone");
         assert_eq!(AirDrop.run(&everyone).status, Status::Warn);

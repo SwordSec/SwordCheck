@@ -1,54 +1,55 @@
-//! Dış komut çalıştırma katmanı.
+//! External command execution layer.
 //!
-//! Kontroller sistem komutlarını doğrudan `std::process::Command` ile değil,
-//! `CommandRunner` trait'i üzerinden çalıştırır. Böylece testlerde gerçek
-//! komut yerine sahte (mock) çıktılar verebiliriz: "dependency injection".
+//! Checks do not run system commands directly with `std::process::Command`;
+//! they go through the `CommandRunner` trait. That way tests can supply fake
+//! (mock) output instead of running the real command: "dependency injection".
 
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Bir komutun ham sonucu.
+/// The raw result of a command.
 #[derive(Debug, Clone, Default)]
 pub struct CmdOutput {
     pub stdout: String,
     pub stderr: String,
-    /// Çıkış kodu 0 ise true.
+    /// True if the exit code is 0.
     pub success: bool,
 }
 
 impl CmdOutput {
-    /// stdout ve stderr'i tek metinde birleştirir. Bazı araçlar
-    /// (ör. `sysadminctl`) asıl bilgiyi stderr'e yazar.
+    /// Joins stdout and stderr into a single text. Some tools
+    /// (e.g. `sysadminctl`) write the actual information to stderr.
     pub fn combined(&self) -> String {
         format!("{}\n{}", self.stdout, self.stderr).trim().to_string()
     }
 
-    /// Eski `run` davranışı: komut başarılıysa ya da stdout doluysa çıktıyı,
-    /// aksi halde hata açıklamasını döndürür.
+    /// The old `run` behavior: returns the output if the command succeeded or
+    /// stdout is non-empty, otherwise the error description.
     pub fn into_stdout(self) -> Result<String, String> {
         if self.success || !self.stdout.is_empty() {
             Ok(self.stdout)
         } else if self.stderr.is_empty() {
-            Err("komut beklenmeyen bir çıkış kodu döndürdü".to_string())
+            Err("command returned an unexpected exit code".to_string())
         } else {
             Err(self.stderr)
         }
     }
 }
 
-/// Komut çalıştırabilen her şey. `Sync` şartı, aynı runner'ın birden çok
-/// iş parçacığından (thread) paylaşılabilmesi içindir.
+/// Anything that can run commands. The `Sync` bound lets the same runner be
+/// shared across multiple threads.
 pub trait CommandRunner: Sync {
-    /// `Err` yalnızca komut hiç başlatılamadığında döner (ör. program yok).
+    /// `Err` is returned only when the command could not be started at all
+    /// (e.g. the program does not exist).
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput, String>;
 }
 
-/// Gerçek sistem komutlarını çalıştırır ve sonuçları önbelleğe alır.
+/// Runs real system commands and caches the results.
 ///
-/// Birkaç kontrol aynı komutu kullanır (ör. `netstat`); önbellek sayesinde
-/// komut bir kez çalışır. `Mutex`, paralel kontrollerin haritaya güvenle
-/// erişmesini sağlar.
+/// Several checks use the same command (e.g. `netstat`); thanks to the cache
+/// the command runs only once. The `Mutex` lets parallel checks access the
+/// map safely.
 #[derive(Default)]
 pub struct SystemRunner {
     cache: Mutex<HashMap<String, Result<CmdOutput, String>>>,
@@ -64,8 +65,8 @@ impl CommandRunner for SystemRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput, String> {
         let key = command_key(program, args);
 
-        // Kilidi yalnızca haritaya bakarken tutuyoruz; komut çalışırken
-        // bırakıyoruz ki diğer kontroller beklemesin.
+        // We hold the lock only while looking at the map and release it
+        // while the command runs, so other checks do not have to wait.
         if let Some(cached) = self.cache.lock().unwrap().get(&key) {
             return cached.clone();
         }
@@ -78,14 +79,14 @@ impl CommandRunner for SystemRunner {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 success: output.status.success(),
             })
-            .map_err(|err| format!("`{program}` çalıştırılamadı: {err}"));
+            .map_err(|err| format!("could not run `{program}`: {err}"));
 
         self.cache.lock().unwrap().insert(key, result.clone());
         result
     }
 }
 
-/// Önbellek ve mock anahtarı: program ve argümanlar boşlukla birleştirilir.
+/// Cache and mock key: the program and its arguments joined with spaces.
 fn command_key(program: &str, args: &[&str]) -> String {
     let mut key = program.to_string();
     for arg in args {
@@ -95,7 +96,7 @@ fn command_key(program: &str, args: &[&str]) -> String {
     key
 }
 
-/// Testler için sahte runner: önceden tanımlanan çıktıları döndürür.
+/// Fake runner for tests: returns predefined outputs.
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockRunner {
@@ -108,7 +109,7 @@ impl MockRunner {
         Self::default()
     }
 
-    /// Başarılı (çıkış kodu 0) bir komut tanımlar.
+    /// Defines a successful (exit code 0) command.
     pub fn ok(mut self, command: &str, stdout: &str) -> Self {
         self.responses.insert(
             command.to_string(),
@@ -121,7 +122,7 @@ impl MockRunner {
         self
     }
 
-    /// Başarısız bir komut tanımlar; mesaj stderr'e yazılmış sayılır.
+    /// Defines a failing command; the message is treated as written to stderr.
     pub fn fail(mut self, command: &str, stderr: &str) -> Self {
         self.responses.insert(
             command.to_string(),
@@ -134,7 +135,7 @@ impl MockRunner {
         self
     }
 
-    /// Başarılı ama çıktısını stderr'e yazan bir komut tanımlar.
+    /// Defines a command that succeeds but writes its output to stderr.
     pub fn ok_stderr(mut self, command: &str, stderr: &str) -> Self {
         self.responses.insert(
             command.to_string(),
@@ -155,6 +156,6 @@ impl CommandRunner for MockRunner {
         self.responses
             .get(&key)
             .cloned()
-            .ok_or_else(|| format!("mock: tanımsız komut `{key}`"))
+            .ok_or_else(|| format!("mock: undefined command `{key}`"))
     }
 }
