@@ -477,9 +477,10 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let rendered = match format {
         Format::Json => report.to_json(),
         _ if cli.quiet => format!(
-            "{} malicious, {} suspicious",
+            "{} malicious, {} suspicious{}",
             report.scan.malware().count(),
-            report.scan.suspicious().count()
+            report.scan.suspicious().count(),
+            incomplete_note(&[(usize::from(incomplete), "OSV lookup failed", "OSV lookup failed")])
         ),
         _ => report.to_text(),
     };
@@ -511,10 +512,15 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     let rendered = match format {
         Format::Json => report.to_json(),
         _ if cli.quiet => format!(
-            "{} secrets, {} locations, {} tracked in git",
+            "{} secrets, {} locations, {} tracked in git{}",
             report.scan.unique_secrets(),
             report.scan.findings.len(),
-            report.scan.tracked().count()
+            report.scan.tracked().count(),
+            incomplete_note(&[(
+                report.scan.git_unknown().count(),
+                "location with unknown git status",
+                "locations with unknown git status"
+            )])
         ),
         _ => report.to_text(),
     };
@@ -567,7 +573,15 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
 
     let rendered = match format {
         Format::Json => report.to_json(),
-        _ if cli.quiet => format!("{} findings, {} known-exploited", report.scan.findings.len(), exploited),
+        _ if cli.quiet => format!(
+            "{} findings, {} known-exploited{}",
+            report.scan.findings.len(),
+            exploited,
+            incomplete_note(&[
+                (report.scan.warnings.len(), "lookup failed", "lookups failed"),
+                (report.scan.skipped.len(), "lockfile not read", "lockfiles not read"),
+            ])
+        ),
         _ => report.to_text(),
     };
     emit(cli, &rendered)?;
@@ -579,6 +593,22 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
         (false, true) => ExitCode::from(EXIT_INCOMPLETE),
         (false, false) => ExitCode::SUCCESS,
     })
+}
+
+/// The end of a `--quiet` summary: "; incomplete: 2 lookups failed" when
+/// part of the scan could not be done, nothing otherwise. Without it an
+/// incomplete scan (exit 3) prints the same line as a clean one.
+fn incomplete_note(parts: &[(usize, &str, &str)]) -> String {
+    let reasons: Vec<String> = parts
+        .iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|&(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
+        .collect();
+    if reasons.is_empty() {
+        String::new()
+    } else {
+        format!("; incomplete: {}", reasons.join(", "))
+    }
 }
 
 /// Exit code for a scan that is incomplete (a lookup failed, a lockfile could
@@ -897,6 +927,45 @@ mod tests {
         assert!(table.starts_with("DATE"), "{table}");
         assert!(table.contains("2026-11-20 14:05"), "{table}");
         assert!(table.contains("1 failed, 1 warned"), "{table}");
+    }
+
+    #[test]
+    fn incomplete_note_lists_each_gap() {
+        assert_eq!(incomplete_note(&[(0, "lookup failed", "lookups failed")]), "");
+        assert_eq!(incomplete_note(&[]), "");
+        assert_eq!(
+            incomplete_note(&[
+                (2, "lookup failed", "lookups failed"),
+                (0, "x", "xs"),
+                (1, "lockfile not read", "lockfiles not read"),
+            ]),
+            "; incomplete: 2 lookups failed, 1 lockfile not read"
+        );
+    }
+
+    #[test]
+    fn readme_documents_exit_3_wherever_a_mode_can_be_incomplete() {
+        // The per-mode sentences must agree with the Exit code table: each of
+        // these modes exits 3 when part of its scan could not be done.
+        let readme = include_str!("../README.md");
+        let section = |heading: &str| {
+            let start = readme.find(heading).expect(heading);
+            let rest = &readme[start + heading.len()..];
+            rest[..rest.find("\n## ").unwrap_or(rest.len())].to_string()
+        };
+        for heading in [
+            "## Secret scan",
+            "## Vulnerability scan",
+            "## npm malicious package scan",
+            "## Full report",
+        ] {
+            assert!(
+                section(heading).contains(" 3 "),
+                "{heading} does not document exit code 3"
+            );
+        }
+        let report = section("## Full report");
+        assert!(report.contains("lockfile could not be read") && report.contains("git could"));
     }
 
     #[test]

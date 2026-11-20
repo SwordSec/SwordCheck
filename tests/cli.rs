@@ -518,3 +518,81 @@ fn a_lockfile_that_cannot_be_read_makes_the_scan_incomplete() {
     let html = std::fs::read_to_string(&out).unwrap();
     assert!(html.contains("1 lockfile could not be read"), "the report says so");
 }
+
+#[test]
+fn quiet_summaries_say_when_a_scan_is_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("quiet");
+    let clean = home.project("clean", false);
+    let unread = home.project("unread", false);
+    std::fs::set_permissions(unread.join("package-lock.json"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    home.write(
+        "loose/.env",
+        &format!("DATABASE_URL=postgres://app:{}@db.prod.internal/app\n", password(1005)),
+    );
+    let loose = home.path("loose");
+    // The git of a Mac without the Command Line Tools: an error, exit 1.
+    let shim = home.write("shim/git", "#!/bin/sh\necho 'xcrun: error' >&2\nexit 1\n");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim_path = format!("{}:/usr/bin:/bin", str(&home.path("shim")));
+    let quiet = |output: Output| {
+        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (output.status.code(), line)
+    };
+    let offline = |args: &[&str]| {
+        home.command(args)
+            .env("https_proxy", DEAD_PROXY)
+            .env("HTTPS_PROXY", DEAD_PROXY)
+            .env("ALL_PROXY", DEAD_PROXY)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .unwrap()
+    };
+
+    // Clean scans keep their summary exactly as before.
+    assert_eq!(
+        quiet(home.run(&["--vulns", "-q", "--vulns-path", str(&clean)])),
+        (Some(0), "0 findings, 0 known-exploited".to_string())
+    );
+    assert_eq!(
+        quiet(home.run(&["--npm", "-q", "--npm-path", str(&clean)])),
+        (Some(0), "0 malicious, 0 suspicious".to_string())
+    );
+
+    // Incomplete scans (exit 3) say so and why.
+    assert_eq!(
+        quiet(home.run(&["--vulns", "-q", "--vulns-path", str(&unread)])),
+        (
+            Some(3),
+            "0 findings, 0 known-exploited; incomplete: 1 lockfile not read".to_string()
+        )
+    );
+    std::fs::set_permissions(unread.join("package-lock.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (code, line) = quiet(offline(&["--vulns", "-q", "--online", "--vulns-path", str(&clean)]));
+    assert_eq!(code, Some(3), "{line}");
+    assert!(
+        line.starts_with("0 findings, 0 known-exploited; incomplete: "),
+        "{line}"
+    );
+    assert!(line.ends_with("lookups failed"), "{line}");
+    assert_eq!(
+        quiet(offline(&["--npm", "-q", "--online", "--npm-path", str(&clean)])),
+        (
+            Some(3),
+            "0 malicious, 0 suspicious; incomplete: 1 OSV lookup failed".to_string()
+        )
+    );
+    let output = home
+        .command(&["--secrets", "-q", "--secrets-path", str(&loose)])
+        .env("PATH", &shim_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        quiet(output),
+        (
+            Some(3),
+            "1 secrets, 1 locations, 0 tracked in git; incomplete: 1 location with unknown git status".to_string()
+        )
+    );
+}

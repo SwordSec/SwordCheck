@@ -164,7 +164,8 @@ it never touches the network.
   reported without a claim about passphrase protection.
 - **Flags:** `TRACKED IN GIT` when the file is tracked by a git repository,
   `mode 644` when group / other users can read it.
-- **Exit code:** 1 if a secret sits in a git-tracked file, 0 otherwise.
+- **Exit code:** 1 if a secret sits in a git-tracked file; otherwise 3 if git
+  could not tell whether a file with a secret is tracked, 0 if not.
 - Only the `text` and `json` formats are supported.
 
 Limits: secrets that only exist in git history (committed, then deleted) are
@@ -204,8 +205,9 @@ ranks them by how likely they are to be exploited.
   about ten times faster; see [API keys](#api-keys).
 - **Options:** `--vulns-path PATH` scans only the lockfiles under a path (and
   skips macOS, apps and Homebrew); `--json`, `-o FILE` and `-q` work as usual.
-- **Exit code:** 1 if a known-exploited vulnerability or malware is found,
-  0 otherwise.
+- **Exit code:** 1 if a known-exploited vulnerability or malware is found;
+  otherwise 3 if an online lookup failed or a lockfile could not be read,
+  0 if not.
 
 Limits: applications and Homebrew formulae are matched through built-in
 tables (bundle ids and formula names), so anything that is not in a table is
@@ -265,7 +267,8 @@ Options:
   supported)
 
 The exit code is 1 when a confirmed malicious package is found; heuristic
-script warnings do not affect it. If something turns up: remove the package or
+script warnings do not affect it. Otherwise it is 3 when the `--online` OSV
+lookup failed, so only the built-in list was checked. If something turns up: remove the package or
 move to a clean version, delete and reinstall `node_modules`, and rotate the
 npm / GitHub / cloud credentials on that machine.
 
@@ -305,7 +308,9 @@ The audit options (`--only`, `--skip`, `--config`, `--min-score`,
 history as usual. The path options narrow the scans to one project; with
 `--vulns-path`, macOS, apps and Homebrew are not scanned. The exit code is 1
 when the audit fails or a scan finds malware, a known-exploited vulnerability
-or a secret in a git-tracked file, and 3 when an online lookup failed.
+or a secret in a git-tracked file; otherwise 3 when part of a scan could not
+be done (an online lookup failed, a lockfile could not be read, or git could
+not tell whether a file with a secret is tracked).
 
 ## History and comparison
 
