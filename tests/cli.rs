@@ -596,3 +596,99 @@ fn quiet_summaries_say_when_a_scan_is_incomplete() {
         )
     );
 }
+
+/// A `curl` that answers OSV, CISA KEV and EPSS from the files in `$FAKE`
+/// and fails for anything else, so the online scan runs without a network.
+const FAKE_CURL: &str = r#"#!/bin/sh
+input=$(cat)
+case "$*" in *querybatch*) cat "$FAKE/batch.json"; exit 0;; esac
+case "$input" in
+  *"output = "*)
+    printf '%s\n' "$input" | while IFS= read -r line; do
+      case "$line" in
+        "url = "*) id=${line##*/}; id=${id%\"};;
+        "output = "*) out=${line#output = \"}; cp "$FAKE/$id.json" "${out%\"}";;
+      esac
+    done
+    exit 0;;
+  *cisa.gov*) [ -f "$FAKE/kev.json" ] && cat "$FAKE/kev.json" && exit 0;;
+  *api.first.org*) echo '{"data": []}'; exit 0;;
+esac
+echo "curl: (7) Failed to connect to fake host" >&2
+exit 7
+"#;
+
+#[test]
+fn online_scan_joins_the_kev_catalog_and_says_when_it_is_stale() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("kev");
+    let app = home.project("app", false);
+    let shim = home.write("shim/curl", FAKE_CURL);
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim_path = format!("{}:/usr/bin:/bin", str(&home.path("shim")));
+    home.write(
+        "fake/batch.json",
+        r#"{"results": [{"vulns": [{"id": "GHSA-aaaa-bbbb-cccc", "modified": "2024-01-01T00:00:00Z"}]}]}"#,
+    );
+    // One advisory, two CVEs in the catalog; only the second is used in ransomware.
+    home.write(
+        "fake/GHSA-aaaa-bbbb-cccc.json",
+        r#"{"id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2024-1", "CVE-2024-2"], "summary": "Test",
+            "database_specific": {"severity": "HIGH"}}"#,
+    );
+    home.write(
+        "fake/kev.json",
+        r#"{"vulnerabilities": [
+            {"cveID": "CVE-2024-1", "dateAdded": "2024-02-01", "knownRansomwareCampaignUse": "Unknown"},
+            {"cveID": "CVE-2024-2", "dateAdded": "2024-03-01", "knownRansomwareCampaignUse": "Known"}
+        ]}"#,
+    );
+    let scan = || {
+        let output = home
+            .command(&["--vulns", "--online", "--json", "--vulns-path", str(&app)])
+            .env("PATH", &shim_path)
+            .env("FAKE", home.path("fake"))
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("a JSON report");
+        (output.status.code(), report)
+    };
+
+    // The downloaded catalog, then the cached copy of the same day.
+    for run in ["downloaded", "cached"] {
+        let (code, report) = scan();
+        assert_eq!(code, Some(1), "{run}: {report}");
+        assert_eq!(report["warnings"], serde_json::json!([]), "{run}");
+        assert_eq!(
+            report["findings"][0]["kev"],
+            serde_json::json!({"date_added": "2024-03-01", "ransomware": true}),
+            "{run}"
+        );
+        // From now on the download fails.
+        let _ = std::fs::remove_file(home.path("fake/kev.json"));
+    }
+
+    // Older than a day and the download fails: the old copy is still used,
+    // but the report says the catalog may be out of date.
+    let ninety_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(home.path(".swordcheck/cache/kev.json"))
+        .unwrap()
+        .set_modified(ninety_days_ago)
+        .unwrap();
+    let (code, report) = scan();
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["findings"][0]["kev"]["ransomware"], true);
+    let warning = report["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.starts_with(
+            "CISA KEV download failed: curl: (7) Failed to connect to fake host; used the cached catalog of "
+        ),
+        "{warning}"
+    );
+    assert!(
+        warning.ends_with(", which may miss recently added vulnerabilities."),
+        "{warning}"
+    );
+}

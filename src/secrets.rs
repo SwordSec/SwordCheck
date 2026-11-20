@@ -250,6 +250,10 @@ pub struct SkippedFiles {
     pub binary: usize,
     /// Could not be read (permissions, vanished, not a regular file).
     pub unreadable: usize,
+    /// Folders that could not be opened: the candidates in them were neither
+    /// scanned nor counted above.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unreadable_folders: usize,
 }
 
 impl SkippedFiles {
@@ -270,6 +274,17 @@ impl SkippedFiles {
             .map(|(count, why)| format!("{count} {why}"))
             .collect();
         parts.join(", ")
+    }
+
+    /// E.g. `1 folder could not be opened, so the files in it were not scanned`.
+    pub fn folders_note(&self) -> Option<String> {
+        match self.unreadable_folders {
+            0 => None,
+            1 => Some("1 folder could not be opened, so the files in it were not scanned".to_string()),
+            count => Some(format!(
+                "{count} folders could not be opened, so the files in them were not scanned"
+            )),
+        }
     }
 }
 
@@ -859,6 +874,8 @@ enum Skip {
     TooLarge,
     Binary,
     Unreadable,
+    /// A folder the walk could not open (see `unique_files`).
+    Folder,
 }
 
 /// Turns file contents into text: UTF-8 (invalid sequences are replaced), or
@@ -888,6 +905,9 @@ fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
 /// not scanned; the reason is returned so that they can be counted.
 fn scan_file(path: &Path) -> Result<Vec<Finding>, Skip> {
     let metadata = std::fs::metadata(path).map_err(|_| Skip::Unreadable)?;
+    if metadata.is_dir() {
+        return Err(Skip::Folder);
+    }
     if !metadata.is_file() {
         return Err(Skip::Unreadable);
     }
@@ -981,6 +1001,10 @@ fn git_tracked(path: &Path) -> Option<bool> {
         .then_some(false)
 }
 
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -997,6 +1021,7 @@ pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
     let next = AtomicUsize::new(0);
     let scanned = AtomicUsize::new(0);
     let (too_large, binary, unreadable) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+    let folders = AtomicUsize::new(0);
     let collected: Mutex<Vec<Finding>> = Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism()
         .map_or(4, usize::from)
@@ -1020,6 +1045,7 @@ pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
                         Err(Skip::TooLarge) => &too_large,
                         Err(Skip::Binary) => &binary,
                         Err(Skip::Unreadable) => &unreadable,
+                        Err(Skip::Folder) => &folders,
                     };
                     skipped.fetch_add(1, Ordering::Relaxed);
                     // Reporting every file would cost more than scanning it.
@@ -1038,6 +1064,7 @@ pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
         too_large: too_large.into_inner(),
         binary: binary.into_inner(),
         unreadable: unreadable.into_inner(),
+        unreadable_folders: folders.into_inner(),
     };
 
     Scan {
@@ -1224,6 +1251,8 @@ fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
 
     fn visit(dir: &Path, depth: usize, skip: &[&str], found: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
+            // Kept so that the scan reports it instead of dropping it silently.
+            found.push(dir.to_path_buf());
             return;
         };
         found.extend(
@@ -1292,12 +1321,13 @@ fn is_candidate(name: &str) -> bool {
         || (lower.starts_with("service-account") && lower.ends_with(".json"))
 }
 
-/// Resolves existing files to their real paths and removes duplicates.
+/// Resolves existing files to their real paths and removes duplicates. A
+/// folder that cannot be opened is kept: `scan` counts it as skipped.
 fn unique_files(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     let unique: BTreeSet<PathBuf> = candidates
         .into_iter()
         .filter_map(|path| path.canonicalize().ok())
-        .filter(|path| path.is_file())
+        .filter(|path| path.is_file() || (path.is_dir() && std::fs::read_dir(path).is_err()))
         .collect();
     unique.into_iter().collect()
 }
@@ -1355,6 +1385,9 @@ impl SecretsReport {
                 )
                 .yellow()
             );
+        }
+        if let Some(folders) = scan.skipped.folders_note() {
+            let _ = writeln!(out, "{}", format!(" {folders}").yellow());
         }
         let _ = writeln!(out, "{rule}");
 
@@ -2119,7 +2152,8 @@ mod tests {
             SkippedFiles {
                 too_large: 1,
                 binary: 2,
-                unreadable: 1
+                unreadable: 1,
+                unreadable_folders: 0
             }
         );
         assert_eq!(scan.files_skipped, 4);
@@ -2135,11 +2169,13 @@ mod tests {
         assert_eq!(json["files_skipped"], 4);
         assert_eq!(json["skipped"]["too_large"], 1);
         assert_eq!(json["skipped"]["binary"], 2);
+        assert!(json["skipped"].get("unreadable_folders").is_none());
         let text = report.to_text();
         assert!(
             text.contains("4 files skipped, not scanned: 1 over 8 MB, 2 binary or not text, 1 unreadable"),
             "{text}"
         );
+        assert!(!text.contains("could not be opened"), "{text}");
     }
 
     #[test]
@@ -2308,6 +2344,61 @@ mod tests {
         let mut expected = vec![yarnrc, nested];
         expected.sort();
         assert_eq!(files_under(&dir.0.join("app")), expected);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_counted_not_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        /// Gives access back before `TempDir` removes the tree.
+        struct Unlock(Vec<PathBuf>);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+                }
+            }
+        }
+
+        let dir = TempDir::new("lockedfolder");
+        let open = dir.write("proj/open/.env", "K=1\n");
+        let locked = dir.write("proj/locked/.env", "K=1\n").parent().unwrap().to_path_buf();
+        // Skipped on purpose whether readable or not: never counted.
+        let hidden = dir.write("proj/.cache/.env", "K=1\n").parent().unwrap().to_path_buf();
+        let deps = dir
+            .write("proj/node_modules/.env", "K=1\n")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _unlock = Unlock(vec![locked.clone(), hidden.clone(), deps.clone()]);
+        for path in [&locked, &hidden, &deps] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let files = files_under(&dir.0.join("proj"));
+        assert_eq!(files, [locked.clone(), open]);
+        let scan = scan(&files);
+        assert_eq!((scan.files_scanned, scan.files_skipped), (1, 0));
+        assert_eq!(scan.skipped.unreadable_folders, 1);
+        // The unreadable folder itself as the path.
+        assert_eq!(files_under(&locked), std::slice::from_ref(&locked));
+
+        let report = SecretsReport::new("2026-01-01T00:00:00+00:00".to_string(), scan);
+        let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert_eq!(json["skipped"]["unreadable_folders"], 1);
+        let text = report.to_text();
+        assert!(
+            text.contains("1 folder could not be opened, so the files in it were not scanned"),
+            "{text}"
+        );
+        let two = SkippedFiles {
+            unreadable_folders: 2,
+            ..SkippedFiles::default()
+        };
+        assert_eq!(
+            two.folders_note().as_deref(),
+            Some("2 folders could not be opened, so the files in them were not scanned")
+        );
+        assert_eq!(SkippedFiles::default().folders_note(), None);
     }
 
     #[test]

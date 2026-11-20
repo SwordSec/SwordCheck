@@ -475,9 +475,10 @@ impl FullReport {
         for item in scan.system.iter().filter(|item| !item.exploited.is_empty()) {
             let mut body = String::from("<dl class=\"facts\">");
             for vuln in &item.exploited {
+                let ransomware = if vuln.ransomware { ", used in ransomware" } else { "" };
                 let _ = write!(
                     body,
-                    "<dt>{}</dt><dd>{}, in CISA KEV since {}</dd>",
+                    "<dt>{}</dt><dd>{}, in CISA KEV since {}{ransomware}</dd>",
                     escape(&vuln.cve),
                     escape(&vuln.name),
                     escape(&vuln.date_added)
@@ -700,6 +701,9 @@ impl FullReport {
                     scan.skipped.reasons()
                 ),
             );
+        }
+        if let Some(folders) = scan.skipped.folders_note() {
+            note(out, Tone::Unknown, &folders);
         }
         out.push_str("<div class=\"list\">\n");
         if scan.findings.is_empty() {
@@ -1233,6 +1237,7 @@ mod tests {
             cve: cve.into(),
             name: format!("{cve} name"),
             date_added: "2024-01-02".into(),
+            ransomware: false,
         }
     }
 
@@ -1346,6 +1351,19 @@ mod tests {
             !html.contains("since 2026-11-13"),
             "no comparison against an unscorable run"
         );
+    }
+
+    #[test]
+    fn installed_products_say_when_a_kev_entry_is_used_in_ransomware() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.online = true;
+        report.vulns.online = true;
+        let mut ransomware = kev_vuln("CVE-2024-2");
+        ransomware.ransomware = true;
+        report.vulns.system = vec![system_item("Chrome", vec![ransomware, kev_vuln("CVE-2024-3")], None)];
+        let html = report.to_html();
+        assert!(html.contains("<dd>CVE-2024-2 name, in CISA KEV since 2024-01-02, used in ransomware</dd>"));
+        assert!(html.contains("<dd>CVE-2024-3 name, in CISA KEV since 2024-01-02</dd>"));
     }
 
     #[test]
@@ -1683,6 +1701,7 @@ mod tests {
         report.secrets = secrets::scan(&secrets::files_under(&project));
         report.secrets.files_skipped = 1;
         report.secrets.skipped.binary = 1;
+        report.secrets.skipped.unreadable_folders = 2;
         let html = report.to_html();
 
         assert!(
@@ -1695,6 +1714,7 @@ mod tests {
             "<dt>Also in</dt><dd class=\"mono\">~/my app/backup.env</dd>",
             "<pre>chmod 600 ~/&#39;my app/it&#39;\\&#39;&#39;s.env&#39;</pre>",
             "1 file was skipped, not scanned: 1 binary or not text",
+            "2 folders could not be opened, so the files in them were not scanned",
             "3 secrets · 4 places",
             "<dt>Repeated</dt><dd>2 times in this file</dd>",
             "<dt>File mode</dt><dd>600</dd>",
