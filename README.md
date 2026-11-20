@@ -20,8 +20,24 @@ shows that command for you to run yourself.
 
 ## Install
 
-SwordCheck needs macOS and a Rust toolchain (1.88 or newer, from
-[rustup.rs](https://rustup.rs)). Build it from source:
+SwordCheck runs on macOS (Apple silicon and Intel). Install the latest
+release with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SwordSec/SwordCheck/main/install.sh | sh
+```
+
+The script downloads the release archive from GitHub, checks it against its
+published SHA-256 and puts `swordcheck` in `~/.local/bin`. It never uses
+`sudo`. Set `SWORDCHECK_VERSION=v0.1.0` to pick a release, or
+`SWORDCHECK_INSTALL_DIR` to install elsewhere. You can also download the
+archive yourself from the
+[releases page](https://github.com/SwordSec/SwordCheck/releases). The binary
+is not notarized: a copy downloaded with a browser has to be allowed once
+under System Settings > Privacy & Security.
+
+To build from source instead, you need a Rust toolchain (1.88 or newer, from
+[rustup.rs](https://rustup.rs)):
 
 ```sh
 git clone https://github.com/SwordSec/SwordCheck.git
