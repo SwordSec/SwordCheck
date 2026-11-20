@@ -9,9 +9,18 @@ use std::path::PathBuf;
 
 /// Returns the value of `name`, or `None` when it is not set anywhere.
 pub fn lookup(name: &str) -> Option<String> {
-    let from_env = std::env::var(name).ok().filter(|value| !value.trim().is_empty());
+    lookup_in(std::env::var(name).ok(), &files(), name)
+}
+
+/// `lookup` with the environment's value and the files to read given.
+fn lookup_in(from_env: Option<String>, files: &[PathBuf], name: &str) -> Option<String> {
+    // Trimmed like a value from a file: a CR from a CRLF shell profile or a
+    // pasted trailing space would otherwise end up in the request header.
+    let from_env = from_env
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     from_env.or_else(|| {
-        files().into_iter().find_map(|path| {
+        files.iter().find_map(|path| {
             let text = std::fs::read_to_string(path).ok()?;
             parse(&text, name)
         })
@@ -76,5 +85,25 @@ mod tests {
             "the whole name must match"
         );
         assert_eq!(parse("", "NVD_API_KEY"), None);
+    }
+
+    #[test]
+    fn a_value_from_the_environment_is_trimmed_like_one_from_a_file() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-envfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".env");
+        std::fs::write(&file, "NVD_API_KEY=from-file\n").unwrap();
+        let files = [dir.join("missing.env"), file];
+        let lookup = |from_env: Option<&str>| lookup_in(from_env.map(str::to_string), &files, "NVD_API_KEY");
+
+        // The CR of a CRLF shell profile, a pasted space or newline.
+        for value in ["abc123\r", "abc123 ", " abc123\n", "abc123"] {
+            assert_eq!(lookup(Some(value)).as_deref(), Some("abc123"), "{value:?}");
+        }
+        // Not set, or only whitespace: the files are read, in order.
+        assert_eq!(lookup(Some(" \r\n")).as_deref(), Some("from-file"));
+        assert_eq!(lookup(None).as_deref(), Some("from-file"));
+        assert_eq!(lookup_in(None, &[], "NVD_API_KEY"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
