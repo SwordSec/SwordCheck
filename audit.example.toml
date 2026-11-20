@@ -1,8 +1,8 @@
-# Example configuration for macos-audit.
+# Example configuration for swordcheck.
 #
 # To use it, copy this file as `audit.toml` into the project directory or to
-# `~/.config/macos-audit/audit.toml`. All fields are optional. For the valid
-# check ids, run: `macos-audit --list`
+# `~/.config/swordcheck/audit.toml`. All fields are optional. For the valid
+# check ids, run: `swordcheck --list`
 
 # The exit code is 1 if the score is below this value (handy as a threshold in CI).
 min_score = 80

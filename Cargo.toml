@@ -1,8 +1,9 @@
 [package]
-name = "macos-audit"
+name = "swordcheck"
 version = "0.1.0"
 edition = "2024"
-description = "A small CLI tool that audits local macOS security settings"
+description = "SwordCheck: a read-only security check-up (settings audit, vulnerabilities, npm malware, secrets)"
+authors = ["SwordSec"]
 license-file = "LICENSE.md"
 # Source-available, not open source: keep it off crates.io.
 publish = false

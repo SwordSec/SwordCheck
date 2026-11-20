@@ -41,7 +41,7 @@ impl Config {
     /// Loads the configuration.
     ///
     /// If `explicit` is given, that file is required. Otherwise
-    /// `./audit.toml` and `~/.config/macos-audit/audit.toml` are tried in
+    /// `./audit.toml` and `~/.config/swordcheck/audit.toml` are tried in
     /// order; if neither exists, the default (empty) configuration is returned.
     pub fn load(explicit: Option<&Path>) -> Result<Self, String> {
         let path = match explicit {
@@ -93,7 +93,7 @@ impl Config {
 fn default_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("audit.toml")];
     if let Some(home) = std::env::var_os("HOME") {
-        paths.push(Path::new(&home).join(".config/macos-audit/audit.toml"));
+        paths.push(Path::new(&home).join(".config/swordcheck/audit.toml"));
     }
     paths
 }

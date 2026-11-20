@@ -1,4 +1,7 @@
-# macOS Security Auditor
+# SwordCheck
+
+A security check-up for your computer, by [SwordSec](https://swordsec.com).
+It runs on macOS today; Linux and Windows are planned.
 
 A small, fast Rust CLI that audits the security settings of your Mac, scores
 them out of 100 and reports what to fix. It also finds known vulnerabilities
@@ -153,11 +156,12 @@ ranks them by how likely they are to be exploited.
 - **Offline by default:** without `--online` only the inventory is printed.
   With `--online`, package names and versions are sent to the services above;
   file paths and contents never are.
-- **Cache:** responses are kept under `~/.macos-audit/cache` (advisories until
+- **Cache:** responses are kept under `~/.swordcheck/cache` (advisories until
   they change, KEV and NVD answers for a day).
 - **NVD rate limit:** without an API key the NVD allows 5 requests per 30
-  seconds, so the first run takes a few seconds per product. Set `NVD_API_KEY`
-  to speed it up.
+  seconds, so the first run takes a few seconds per product. A free
+  [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) makes it
+  about ten times faster; see [API keys](#api-keys).
 - **Options:** `--vulns-path PATH` scans only the lockfiles under a path (and
   skips macOS, apps and Homebrew); `--json`, `-o FILE` and `-q` work as usual.
 - **Exit code:** 1 if a known-exploited vulnerability or malware is found,
@@ -171,6 +175,22 @@ miss or over-report; unpinned requirements (`flask>=2.0`) and git / path /
 workspace dependencies are ignored and never sent anywhere, but a private
 registry that looks like a public one cannot be told apart from the lockfile,
 so its package names are looked up too.
+
+## API keys
+
+Everything works without a key. The only service that offers one is the NVD,
+where it lifts the rate limit from 5 to 50 requests per 30 seconds. OSV.dev,
+CISA KEV and EPSS have no keys.
+
+```sh
+cp .env.example .env && chmod 600 .env   # then fill in NVD_API_KEY
+```
+
+A key is looked up in the environment first, then in `./.env`, then in
+`~/.swordcheck/.env`. Only the names listed in
+[`.env.example`](.env.example) are read, the file is never loaded into the
+environment of the commands the tool runs, and the key is sent to the NVD
+only. `.env` is in `.gitignore`.
 
 ## npm malicious package scan (`--npm`)
 
@@ -222,18 +242,18 @@ details of every check, the previous run and the checks that changed.
 ## History and comparison
 
 Every full audit, from the command line or the dashboard, is saved to
-`~/.macos-audit/history.json` (last 100 runs). The next run shows the score
+`~/.swordcheck/history.json` (last 100 runs). The next run shows the score
 difference and the checks whose status changed.
 
 - `--history` : list past audits
 - `--no-history` : do not save or compare
 - Partial runs with `--only` / `--skip` are not saved
-- The `MACOS_AUDIT_HOME` environment variable changes the storage directory
+- The `SWORDCHECK_HOME` environment variable changes the storage directory
 
 ## Configuration (`audit.toml`)
 
 Looked up in this order: `--config FILE`, `./audit.toml`,
-`~/.config/macos-audit/audit.toml`. See
+`~/.config/swordcheck/audit.toml`. See
 [`audit.example.toml`](audit.example.toml) for an example:
 
 ```toml
@@ -262,7 +282,7 @@ afterwards to confirm.
 
 ## Dashboard
 
-`macos-audit` with no arguments (or `--tui`) opens the dashboard when it runs
+`swordcheck` with no arguments (or `--tui`) opens the dashboard when it runs
 in a terminal. When the output is piped or redirected, the plain audit report
 is printed instead, so existing scripts keep working.
 
@@ -299,6 +319,7 @@ On the command line, `--vulns --online` prints the same phases to stderr.
 | `src/npm.rs` | npm package scan, incident list |
 | `src/osv.rs` | OSV.dev batch queries (with paging), shared by both scans |
 | `src/net.rs` | HTTP through the system `curl` |
+| `src/envfile.rs` | API keys from the environment or `.env` |
 | `src/vulns.rs` | Vulnerability scan: OSV / NVD / KEV / EPSS lookups, ranking, report |
 | `src/lockfiles.rs` | Lockfile discovery and parsers |
 | `src/secrets.rs` | Secret scan: rules, file discovery, masking |
@@ -326,9 +347,9 @@ be tested against canned output with `MockRunner`.
 
 ## License
 
-Copyright © 2026 Seyfullah KILIÇ.
+Copyright © 2026 SwordSec.
 
 Source-available under the [PolyForm Strict License 1.0.0](LICENSE.md): you
 may read the code and run the tool for noncommercial purposes. Commercial use,
 redistribution and modified versions are not permitted. This is not an open
-source license. For anything else, ask the author.
+source license. For anything else, including a commercial license, contact SwordSec.

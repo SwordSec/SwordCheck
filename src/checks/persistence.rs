@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn only_plist_files_are_collected() {
-        let dir = std::env::temp_dir().join(format!("macos-audit-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("swordcheck-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("b.plist"), "").unwrap();
         std::fs::write(dir.join("a.plist"), "").unwrap();

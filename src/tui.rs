@@ -822,7 +822,7 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
     let dim = Tone::Dim.style();
 
     let title = Line::from(vec![
-        Span::styled(" macOS Security Auditor ", bold),
+        Span::styled(" SwordCheck ", bold),
         Span::styled(format!("· {os_version} · v{}", env!("CARGO_PKG_VERSION")), dim),
     ]);
     frame.render_widget(Paragraph::new(title).block(Block::bordered()), header);
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn secrets_view_marks_tracked_files_and_copies() {
-        let dir = std::env::temp_dir().join(format!("macos-audit-tui-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("swordcheck-tui-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
         // Built at run time so that no key-shaped string sits in the source.

@@ -73,7 +73,7 @@ mod tests {
     /// Sets up a temporary `node_modules` and scans it.
     fn scan_fixture(label: &str, manifest: serde_json::Value) -> npm::Scan {
         let root: PathBuf = std::env::temp_dir()
-            .join(format!("macos-audit-supply-{label}-{}", std::process::id()));
+            .join(format!("swordcheck-supply-{label}-{}", std::process::id()));
         let package = root.join("node_modules/pkg");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(package.join("package.json"), manifest.to_string()).unwrap();

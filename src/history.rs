@@ -1,4 +1,4 @@
-//! Audit history: every run is appended to `~/.macos-audit/history.json`
+//! Audit history: every run is appended to `~/.swordcheck/history.json`
 //! and compared against the previous state on the next run.
 
 use crate::checks::{CheckResult, Status};
@@ -61,11 +61,11 @@ fn rank(status: Status) -> u8 {
 }
 
 /// Path of the history file. The directory can be changed with the
-/// `MACOS_AUDIT_HOME` environment variable (handy in tests and experiments).
+/// `SWORDCHECK_HOME` environment variable (handy in tests and experiments).
 pub fn history_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("MACOS_AUDIT_HOME") {
+    let dir = match std::env::var_os("SWORDCHECK_HOME") {
         Some(dir) => PathBuf::from(dir),
-        None => Path::new(&std::env::var_os("HOME")?).join(".macos-audit"),
+        None => Path::new(&std::env::var_os("HOME")?).join(".swordcheck"),
     };
     Some(dir.join("history.json"))
 }
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn writes_reads_back_and_truncates() {
-        let dir = std::env::temp_dir().join(format!("macos-audit-hist-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("swordcheck-hist-{}", std::process::id()));
         let path = dir.join("history.json");
 
         assert!(load(&path).unwrap().is_empty(), "empty list when the file is missing");
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn corrupt_file_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("macos-audit-bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("swordcheck-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.json");
         std::fs::write(&path, "{ broken").unwrap();
