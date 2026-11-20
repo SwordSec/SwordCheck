@@ -117,3 +117,21 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 .github/scripts/ci_summary.py coverage "$BASE_SHA" lcov.info
+
+  # The single check that branch protection requires. It passes only when
+  # every job above passed, so jobs can be added or renamed without
+  # changing the protection settings.
+  all:
+    name: Build, test and lint
+    if: ${{ always() }}
+    needs: [format, lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "format, lint, test: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = success ] || exit 1
+          done
