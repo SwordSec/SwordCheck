@@ -60,7 +60,7 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns / --report with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns / --report with --online;\n     --secrets / --report when git could not tell whether a file is tracked)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
 ,
     // The path options of a scan also narrow that scan inside `--report`.
     group(ArgGroup::new("npm_scope").args(["npm", "report"])),
@@ -519,7 +519,13 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     };
     emit(cli, &rendered)?;
 
-    Ok(if exposed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    // A file whose git status is unknown may be tracked: not a clean result.
+    let unknown = report.scan.git_unknown().next().is_some();
+    Ok(match (exposed, unknown) {
+        (true, _) => ExitCode::FAILURE,
+        (false, true) => ExitCode::from(EXIT_INCOMPLETE),
+        (false, false) => ExitCode::SUCCESS,
+    })
 }
 
 /// `--vulns`: lists known vulnerabilities in project dependencies, macOS and

@@ -202,6 +202,10 @@ pub struct Finding {
     pub secret_id: usize,
     /// Is the file tracked in a git repository (has it been committed)?
     pub git_tracked: bool,
+    /// Could git not tell whether the file is tracked? `git_tracked` is then
+    /// `false`, which must not be read as "not tracked".
+    #[serde(skip_serializing_if = "is_false")]
+    pub git_unknown: bool,
     /// File mode, octal (e.g. `644`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -255,6 +259,10 @@ pub struct ProviderSummary {
     pub git_tracked: usize,
 }
 
+/// What to do when git could not tell whether a file with a secret is tracked.
+pub const GIT_UNKNOWN_ADVICE: &str = "Git could not tell whether this file is tracked. Check with `git ls-files FILE` \
+     in the project before treating the secret as private.";
+
 #[derive(Debug, Default, Serialize)]
 pub struct Scan {
     pub files_scanned: usize,
@@ -272,6 +280,11 @@ impl Scan {
 
     pub fn tracked(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|finding| finding.git_tracked)
+    }
+
+    /// Locations whose git status could not be determined.
+    pub fn git_unknown(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|finding| finding.git_unknown)
     }
 }
 
@@ -882,6 +895,7 @@ fn scan_file(path: &Path) -> Result<Vec<Finding>, Skip> {
             occurrences: 1,
             secret_id: 0,
             git_tracked: false,
+            git_unknown: false,
             mode: None,
             others_can_read: false,
             offset: found.offset,
@@ -893,7 +907,8 @@ fn scan_file(path: &Path) -> Result<Vec<Finding>, Skip> {
         let mode = file_mode(&metadata);
         let tracked = git_tracked(path);
         for finding in &mut findings {
-            finding.git_tracked = tracked;
+            finding.git_tracked = tracked == Some(true);
+            finding.git_unknown = tracked.is_none();
             finding.mode = mode.map(|mode| format!("{mode:o}"));
             finding.others_can_read = mode.is_some_and(|mode| mode & 0o044 != 0);
         }
@@ -912,22 +927,35 @@ fn file_mode(_: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-/// Is the file tracked in a git repository? `false` if `git` is missing or
-/// the file is outside a repository.
-fn git_tracked(path: &Path) -> bool {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        return false;
-    };
-    Command::new("git")
+/// Is the file tracked in a git repository? `Some(false)` when it is not or
+/// lies outside any repository; `None` when git could not tell (not installed,
+/// the Command Line Tools shim of a Mac without them, or a repository git
+/// refuses to read), which must not pass for "not tracked".
+fn git_tracked(path: &Path) -> Option<bool> {
+    let (dir, name) = (path.parent()?, path.file_name()?);
+    // `:(literal)`: a name such as `.env*` is not a pattern matching other files.
+    let mut pathspec = std::ffi::OsString::from(":(literal)");
+    pathspec.push(name);
+    let output = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(name)
+        .args(["ls-files", "-z", "--"])
+        .arg(pathspec)
+        // The error text is matched below, so it must not be translated.
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        return Some(!output.stdout.is_empty());
+    }
+    String::from_utf8_lossy(&output.stderr)
+        .contains("not a git repository")
+        .then_some(false)
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Scans the files by spreading them across threads and summarizes the result.
@@ -1353,6 +1381,9 @@ impl SecretsReport {
             if finding.git_tracked {
                 flags.push("TRACKED IN GIT".red().bold().to_string());
             }
+            if finding.git_unknown {
+                flags.push("GIT STATUS UNKNOWN".yellow().bold().to_string());
+            }
             if finding.others_can_read
                 && let Some(mode) = &finding.mode
             {
@@ -1380,6 +1411,17 @@ impl SecretsReport {
                 out,
                 "If the repository has been shared, treat the secret as leaked: revoke and rotate it at the provider,\n\
                  add the file to `.gitignore` and untrack it with `git rm --cached`."
+            );
+        }
+        let unknown = scan.git_unknown().count();
+        if unknown > 0 {
+            let _ = writeln!(
+                out,
+                "{}",
+                format!(
+                    "Locations where git could not tell whether the file is tracked: {unknown}. {GIT_UNKNOWN_ADVICE}"
+                )
+                .yellow()
             );
         }
         let loose = scan.findings.iter().filter(|f| f.others_can_read).count();
@@ -1714,6 +1756,36 @@ mod tests {
         let scan = scan(&files_under(&dir.0));
         let tracked: Vec<_> = scan.tracked().map(|f| f.path.file_name().unwrap().to_owned()).collect();
         assert_eq!(tracked, ["tracked.env"]);
+    }
+
+    #[test]
+    fn file_names_are_not_read_as_git_patterns() {
+        // `.env*` would match `.env-prod`, `:!x.env` every other file, and
+        // `.env[1]` the file `.env1`, if the name were a pathspec.
+        let dir = TempDir::new("pathspec");
+        for name in [".env-prod", ".env1", "a?.env", ".env*", ":!x.env", ".env[1]"] {
+            dir.write(name, "K=v\n");
+        }
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir.0)
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        assert!(git(&["init", "-q"]) && git(&["add", "--", ".env-prod", ".env1", ":(literal)a?.env"]));
+        let tracked = |name: &str| git_tracked(&dir.0.join(name));
+        for name in [".env-prod", ".env1", "a?.env"] {
+            assert_eq!(tracked(name), Some(true), "{name}");
+        }
+        for name in [".env*", ":!x.env", ".env[1]"] {
+            assert_eq!(tracked(name), Some(false), "{name}");
+        }
+        // Outside any repository: not tracked, not unknown.
+        let outside = TempDir::new("no-repo");
+        outside.write(".env", "K=v\n");
+        assert_eq!(git_tracked(&outside.0.join(".env")), Some(false));
     }
 
     #[test]
