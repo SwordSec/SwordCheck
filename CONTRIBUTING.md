@@ -31,6 +31,17 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI runs the same four commands on macOS. Checks talk to the system through
-`CommandRunner`, so they are tested against canned output with `MockRunner`;
-please add a test for every behaviour you change.
+CI runs the same four commands: format and lint on Linux, the tests on
+macOS. Checks talk to the system through `CommandRunner`, so they are tested
+against canned output with `MockRunner`; please add a test for every
+behaviour you change.
+
+On a pull request, CI also checks that every line the pull request adds or
+changes under `src/` is run by a test, and lists the lines that are not. To
+check this before pushing, install
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and run:
+
+```sh
+cargo llvm-cov --lcov --output-path lcov.info
+python3 .github/scripts/ci_summary.py coverage origin/main lcov.info
+```

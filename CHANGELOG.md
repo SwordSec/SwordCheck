@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` no longer stops with "no published release yet" in the first
+  minutes after a release: when GitHub's `/releases/latest` redirect still
+  lags, it asks the GitHub API for the latest tag.
+
 ## [0.1.0] - 2026-11-20
 
 First public version.
