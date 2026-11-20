@@ -271,23 +271,32 @@ impl Check for Sharing {
                     .filter(|(port, _)| exposure(&own, *port) == Exposure::Network)
                     .map(|(_, name)| *name)
                     .collect();
+                let mut unasked = None;
                 for (name, daemon) in services {
                     match daemon_enabled(runner, daemon) {
                         Ok(true) => enabled.push(name),
                         Ok(false) => {}
-                        Err(launchd) => return Outcome::unknown(format!("{err} {launchd}")),
+                        Err(launchd) => unasked = unasked.or(Some(launchd)),
                     }
                 }
-                if enabled.is_empty() {
-                    Outcome::pass(
+                // A service found switched on stays a finding even when
+                // launchd could not be asked about the others.
+                match (enabled.is_empty(), unasked) {
+                    (true, Some(launchd)) => Outcome::unknown(format!("{err} {launchd}")),
+                    (true, None) => Outcome::pass(
                         "Screen Sharing and File Sharing are switched off in launchd (the socket list was unavailable).",
-                    )
-                } else {
-                    Outcome::warn(
-                        format!("Switched on: {} (the socket list was unavailable).", enabled.join(", ")),
+                    ),
+                    (false, unasked) => Outcome::warn(
+                        format!(
+                            "Switched on: {} (the socket list was unavailable{}).",
+                            enabled.join(", "),
+                            unasked
+                                .map(|launchd| format!("; launchd could not be asked about the others: {launchd}"))
+                                .unwrap_or_default()
+                        ),
                         "Turn off the services you don't use (Screen Sharing, File Sharing, Remote Management) \
                          in System Settings > General > Sharing.",
-                    )
+                    ),
                 }
             }
         }
@@ -400,6 +409,44 @@ mod tests {
         assert_eq!(Sharing.run(&base().ok(LSOF, &local)).status, Status::Pass);
         // No lsof at all: launchd alone decides.
         assert_eq!(Ssh.run(&base()).status, Status::Pass);
+    }
+
+    #[test]
+    fn sharing_keeps_a_service_found_on_when_launchd_fails() {
+        const LSOF: &str = "lsof -nP -iTCP -sTCP:LISTEN";
+        let vnc = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n\
+                   vnc 9 alice 5u IPv4 0x2 0t0 TCP *:5900 (LISTEN)\n";
+        let silent = || MockRunner::new().ok(NETSTAT, "");
+
+        // `lsof` shows an exposed server; launchd cannot be asked.
+        let outcome = Sharing.run(&silent().ok(LSOF, vnc).fail(OVERRIDES, "Operation not permitted"));
+        assert_eq!(outcome.status, Status::Warn);
+        assert!(
+            outcome
+                .detail
+                .starts_with("Switched on: Screen Sharing (5900) (the socket list was unavailable; ")
+                && outcome.detail.contains("launchd could not be asked about the others"),
+            "{}",
+            outcome.detail
+        );
+
+        // launchd answers for one service but not the other.
+        let partial =
+            "disabled services = {\n\t\"com.apple.screensharing\" => enabled\n\t\"com.apple.smbd\" => maybe\n}";
+        let outcome = Sharing.run(&silent().ok(OVERRIDES, partial));
+        assert_eq!(outcome.status, Status::Warn);
+        assert!(
+            outcome.detail.contains("Screen Sharing (the socket list")
+                && outcome
+                    .detail
+                    .contains("Unrecognised launchd state for com.apple.smbd: maybe"),
+            "{}",
+            outcome.detail
+        );
+
+        // Nothing found on and launchd unusable: still no verdict.
+        let none = "disabled services = {\n\t\"com.apple.screensharing\" => disabled\n\t\"com.apple.smbd\" => maybe\n}";
+        assert_eq!(Sharing.run(&silent().ok(OVERRIDES, none)).status, Status::Unknown);
     }
 
     #[test]
