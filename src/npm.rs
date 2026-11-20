@@ -193,7 +193,8 @@ pub enum Kind {
     IocFile,
     /// Suspicious install script (heuristic).
     Script,
-    /// A `package.json` too large to read, so the package was not checked.
+    /// A `package.json` too large or too deeply nested to read, so the package
+    /// was not checked.
     Unread,
 }
 
@@ -221,7 +222,7 @@ impl Kind {
             }
             Kind::Script => "Heuristic warning: read the install script and decide.",
             Kind::Unread => {
-                "Its package.json is too large to read, so the package was not checked against the malware list: look at it by hand."
+                "Its package.json is too large or too deeply nested to read, so the package was not checked against the malware list: look at it by hand."
             }
         }
     }
@@ -256,6 +257,11 @@ pub struct Scan {
     /// for the OSV query.
     #[serde(skip)]
     pub installed: Installed,
+    /// Why npm's own global directory could not be located (`npm root -g`
+    /// failed), if it could not: a custom npm prefix may then be missing
+    /// from `roots`, so "nothing found" is no verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_dir_problem: Option<String>,
 }
 
 impl Scan {
@@ -266,6 +272,12 @@ impl Scan {
     /// Warnings: suspicious install scripts and packages that were not checked.
     pub fn suspicious(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|finding| !finding.kind.is_malware())
+    }
+
+    /// Says that npm's own global directory may not have been scanned, if
+    /// `npm root -g` failed.
+    pub fn global_dir_note(&self) -> Option<String> {
+        self.global_dir_problem.as_deref().map(unlocated_note)
     }
 
     /// Packages whose manifest could not be read, so they were not checked.
@@ -342,6 +354,7 @@ pub fn scan_with(roots: &[PathBuf], progress: &Progress) -> Scan {
         packages: scanner.packages,
         findings,
         installed: scanner.installed,
+        global_dir_problem: None,
     }
 }
 
@@ -395,16 +408,10 @@ impl Scanner {
         match read_manifest(&dir.join("package.json")) {
             Ok(Some(manifest)) => self.inspect(dir, &manifest),
             Ok(None) => {}
-            // npm installs a package whatever the size of its manifest, so a
-            // padded one must not hide the package: say it was not checked.
-            Err(size) => {
-                let reason = format!(
-                    "package.json is {} MB, over the {} MB this scan reads; check the package by hand",
-                    size.div_ceil(1024 * 1024),
-                    MAX_MANIFEST_BYTES / (1024 * 1024)
-                );
-                self.hit(Kind::Unread, &package_name(dir), "", reason, dir);
-            }
+            // npm installs a package whatever the size or nesting of its
+            // manifest, so such a manifest must not hide the package: say it
+            // was not checked.
+            Err(reason) => self.hit(Kind::Unread, &package_name(dir), "", reason, dir),
         }
         if depth < MAX_NESTING {
             self.node_modules(&dir.join("node_modules"), depth + 1);
@@ -473,20 +480,67 @@ fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// Reads a `package.json`: `Ok(None)` when there is none or it is not JSON,
-/// `Err(size)` when it is too large to read.
-fn read_manifest(path: &Path) -> Result<Option<Value>, u64> {
+/// `Err(reason)` when it is too large or too deeply nested to read.
+fn read_manifest(path: &Path) -> Result<Option<Value>, String> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return Ok(None);
     };
     if metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(metadata.len());
+        return Err(format!(
+            "package.json is {} MB, over the {} MB this scan reads; check the package by hand",
+            metadata.len().div_ceil(1024 * 1024),
+            MAX_MANIFEST_BYTES / (1024 * 1024)
+        ));
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return Ok(None);
     };
-    // npm and Node strip a leading UTF-8 BOM, so such a package installs and
-    // runs its scripts; it must not slip past the scan.
-    Ok(serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok())
+    // npm reads the manifest the way JSON.parse does, and installs the
+    // package and runs its scripts whenever that succeeds; the scan must not
+    // be stricter. npm decodes bytes that are not UTF-8 as U+FFFD and strips
+    // a leading BOM, and JSON.parse accepts lone surrogate escapes.
+    let text = String::from_utf8_lossy(&bytes);
+    let text = well_formed_escapes(text.strip_prefix('\u{feff}').unwrap_or(&text));
+    match serde_json::from_str(&text) {
+        Ok(manifest) => Ok(Some(manifest)),
+        // JSON.parse has no nesting limit; serde_json stops at 128 levels.
+        Err(err) if err.to_string().starts_with("recursion limit exceeded") => {
+            Err("package.json is nested too deeply for this scan to read; check the package by hand".to_string())
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Replaces `\uXXXX` escapes of lone UTF-16 surrogates with `�`, which
+/// serde_json accepts. JSON.parse accepts them as they are; a surrogate pair
+/// and every other escape are kept.
+fn well_formed_escapes(text: &str) -> String {
+    let surrogate = |text: &str, at: usize| {
+        let code = text.get(at..at + 6)?.strip_prefix("\\u")?;
+        u16::from_str_radix(code, 16)
+            .ok()
+            .filter(|code| (0xD800..=0xDFFF).contains(code))
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = 0;
+    let mut at = 0;
+    while let Some(offset) = text[at..].find('\\') {
+        at += offset;
+        match surrogate(text, at) {
+            Some(0xD800..=0xDBFF) if surrogate(text, at + 6).is_some_and(|low| low >= 0xDC00) => at += 12,
+            Some(_) => {
+                out.push_str(&text[rest..at]);
+                out.push_str("\\ufffd");
+                at += 6;
+                rest = at;
+            }
+            // Any other escape, including `\\`: skip the backslash and the
+            // character after it, which cannot start a surrogate escape.
+            None => at += 1 + text[at + 1..].chars().next().map_or(0, char::len_utf8),
+        }
+    }
+    out.push_str(&text[rest..]);
+    out
 }
 
 /// The package name a directory under `node_modules` stands for
@@ -595,15 +649,17 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Global install directories: npm, pnpm, yarn, bun, version managers and
-/// the `npx` cache. Only the ones that exist are returned.
-pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
-    global_roots_checked(runner).0
+/// Says that npm's own global directory may not have been scanned because
+/// `npm root -g` failed with `problem`.
+pub fn unlocated_note(problem: &str) -> String {
+    format!("npm's own global directory could not be located, so it may not have been scanned: {problem}.")
 }
 
-/// Like `global_roots`, and also says why npm's own global directory could
-/// not be determined, if `npm` is installed but did not answer. The fixed
-/// locations are still returned then; a custom `prefix` would be missed.
+/// Global install directories: npm, pnpm, yarn, bun, version managers and
+/// the `npx` cache. Only the ones that exist are returned, with why npm's own
+/// global directory could not be determined, if `npm` is installed but did
+/// not answer. The fixed locations are still returned then; a custom
+/// `prefix` would be missed.
 pub fn global_roots_checked(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option<String>) {
     let mut problem = None;
     let mut candidates: Vec<PathBuf> = vec![
@@ -653,9 +709,10 @@ pub fn global_roots_checked(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option
 }
 
 /// Global directories + the `node_modules` directories of projects in the
-/// home directory.
-pub fn all_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
-    let mut roots = global_roots(runner);
+/// home directory, and why npm's own global directory could not be
+/// located, if it could not (see `global_roots_checked`).
+pub fn all_roots(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option<String>) {
+    let (mut roots, problem) = global_roots_checked(runner);
     if let Some(home) = home() {
         // Projects are not searched for in these folders at the root of the
         // home directory: they are large, and the global directories under
@@ -663,7 +720,7 @@ pub fn all_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
         const SKIP: [&str; 6] = ["Library", "Applications", "Music", "Movies", "Pictures", "Public"];
         roots.extend(find_node_modules(&home, &SKIP));
     }
-    unique_dirs(roots)
+    (unique_dirs(roots), problem)
 }
 
 /// Turns a user-supplied path into scan roots: the path itself if it is a
@@ -867,6 +924,12 @@ impl NpmReport {
                 "Remove the package or move to a clean version, delete and reinstall `node_modules`,\n\
                  and rotate the npm / GitHub / cloud keys and passwords on this machine."
             );
+        } else if scan.global_dir_problem.is_some() {
+            let _ = writeln!(
+                out,
+                "{}",
+                "No known malicious packages found in the directories that were scanned.".yellow()
+            );
         } else {
             let _ = writeln!(out, "{}", "No known malicious packages found.".green().bold());
         }
@@ -886,6 +949,9 @@ impl NpmReport {
                 "{}",
                 format!("{unread} packages not checked: {}", Kind::Unread.advice()).yellow()
             );
+        }
+        if let Some(note) = scan.global_dir_note() {
+            let _ = writeln!(out, "{}", note.yellow());
         }
         if scan.roots.is_empty() {
             let _ = writeln!(out, "{}", "No node_modules directory found to scan.".dimmed());
@@ -1119,16 +1185,10 @@ mod tests {
         temp.package("node_modules/event-stream", padded("event-stream"));
         temp.package("node_modules/@scope/tool", padded("@scope/tool"));
         temp.package("node_modules/left-pad", pkg("left-pad", "1.3.0"));
-        // No manifest, or one that is not a readable text file: still skipped
-        // quietly, as before (npm cannot install such a package).
+        // No manifest, or one that is not a file: still skipped quietly, as
+        // before (npm cannot install such a package).
         std::fs::create_dir_all(temp.0.join("node_modules/no-manifest")).unwrap();
         std::fs::create_dir_all(temp.0.join("node_modules/odd/package.json")).unwrap();
-        std::fs::create_dir_all(temp.0.join("node_modules/latin1")).unwrap();
-        std::fs::write(
-            temp.0.join("node_modules/latin1/package.json"),
-            b"{\"name\":\"caf\xe9\"}",
-        )
-        .unwrap();
 
         let scan = scan(&[temp.0.join("node_modules")]);
         assert_eq!(scan.packages, 1, "only left-pad could be read");
@@ -1149,6 +1209,53 @@ mod tests {
                 .to_text()
                 .contains("[NOT CHECKED]")
         );
+    }
+
+    #[test]
+    fn manifests_npm_accepts_are_not_hidden_by_a_stricter_parser() {
+        // npm installs each of these and runs its install scripts: JSON.parse
+        // accepts a lone surrogate escape and any nesting, and npm decodes
+        // bytes that are not UTF-8 as U+FFFD.
+        let temp = TempDir::new("lenient");
+        let write = |name: &str, extra: &[u8]| {
+            let dir = temp.0.join("node_modules").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut manifest = format!(r#"{{"name":"{name}","version":"5.6.1","#).into_bytes();
+            manifest.extend_from_slice(extra);
+            manifest.extend_from_slice(br#""scripts":{"postinstall":"node setup.js"}}"#);
+            std::fs::write(dir.join("package.json"), manifest).unwrap();
+        };
+        write("chalk", br#""description":"\ud800 and \udc00 and \ud83d\ude00","#);
+        write("debug", b"\"description\":\"caf\xe9\",");
+        let deep = format!(r#""x":{}{},"#, "[".repeat(200), "]".repeat(200));
+        write("supports-color", deep.as_bytes());
+
+        let scan = scan(&[temp.0.join("node_modules")]);
+        let found: Vec<(Kind, &str)> = scan
+            .findings
+            .iter()
+            .map(|finding| (finding.kind, finding.package.as_str()))
+            .collect();
+        assert_eq!(found, [(Kind::Known, "chalk"), (Kind::Unread, "supports-color")]);
+        assert_eq!(scan.packages, 2, "chalk and debug were read");
+        assert!(scan.installed.contains_key(&("debug".to_string(), "5.6.1".to_string())));
+        assert_eq!(
+            scan.findings[1].reason,
+            "package.json is nested too deeply for this scan to read; check the package by hand"
+        );
+    }
+
+    #[test]
+    fn lone_surrogate_escapes_are_made_well_formed() {
+        assert_eq!(well_formed_escapes(r#""\ud800""#), r#""\ufffd""#);
+        assert_eq!(well_formed_escapes(r#""a\uDC00b\ud800""#), r#""a\ufffdb\ufffd""#);
+        // A pair, other escapes and an escaped backslash stay as they are.
+        let kept = r#""\ud83d\ude00 \u00e9 \n \\ud800 \é""#;
+        assert_eq!(well_formed_escapes(kept), kept);
+        // A high surrogate followed by another high one, and a cut-off escape.
+        assert_eq!(well_formed_escapes(r"\ud800\ud801\udc01"), r"\ufffd\ud801\udc01");
+        assert_eq!(well_formed_escapes(r"\ud80"), r"\ud80");
+        assert_eq!(well_formed_escapes("end\\"), "end\\");
     }
 
     #[test]
@@ -1222,7 +1329,7 @@ mod tests {
         colored::control::set_override(false);
         let text = NpmReport::new(String::new(), false, scan).to_text();
         assert!(
-            text.contains("1 packages not checked: Its package.json is too large to read"),
+            text.contains("1 packages not checked: Its package.json is too large or too deeply nested to read"),
             "{text}"
         );
         assert!(!text.contains("suspicious install scripts"), "{text}");

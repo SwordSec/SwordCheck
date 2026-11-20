@@ -90,6 +90,9 @@ impl FullReport {
         if matches!(self.npm_lookup, Some(Err(_))) {
             gaps.push("the OSV lookup for npm packages failed");
         }
+        if self.npm.global_dir_problem.is_some() {
+            gaps.push("npm's own global directory could not be located");
+        }
         if self.secrets.git_unknown().next().is_some() {
             gaps.push("git could not tell whether a file with a secret is tracked");
         }
@@ -182,7 +185,7 @@ impl FullReport {
         } else {
             (Tone::Unknown, "offline".to_string())
         };
-        let npm_incomplete = matches!(self.npm_lookup, Some(Err(_)));
+        let npm_incomplete = matches!(self.npm_lookup, Some(Err(_))) || self.npm.global_dir_problem.is_some();
         let npm = match (self.npm.malware().count(), self.npm.findings.len(), npm_incomplete) {
             (1.., count, _) => (Tone::Crit, count.to_string()),
             (0, count @ 1.., _) => (Tone::Warn, count.to_string()),
@@ -635,14 +638,20 @@ impl FullReport {
                 ),
             );
         }
+        if let Some(text) = scan.global_dir_note() {
+            note(out, Tone::Warn, &text);
+        }
         out.push_str("<div class=\"list\">\n");
-        match (scan.findings.is_empty(), &self.npm_lookup) {
-            (true, Some(Err(_))) => out.push_str(
+        match (scan.findings.is_empty(), &self.npm_lookup, &scan.global_dir_problem) {
+            (true, Some(Err(_)), _) => out.push_str(
                 "<p class=\"empty\">No malicious or suspicious package in the built-in list; \
                  packages known only to OSV.dev were not checked.</p>\n",
             ),
-            (true, _) => out.push_str("<p class=\"empty\">No malicious or suspicious package found.</p>\n"),
-            (false, _) => {}
+            (true, _, Some(_)) => out.push_str(
+                "<p class=\"empty\">No malicious or suspicious package in the directories that were scanned.</p>\n",
+            ),
+            (true, _, None) => out.push_str("<p class=\"empty\">No malicious or suspicious package found.</p>\n"),
+            (false, _, _) => {}
         }
         for finding in scan.malware().chain(scan.suspicious()) {
             let malware = finding.kind.is_malware();
@@ -1803,6 +1812,24 @@ mod tests {
         assert!(html.contains("<a href=\"#vulns\">Vulnerabilities <b class=\"ok\">0</b>"));
         assert!(html.contains("<a href=\"#npm\">npm <b class=\"ok\">0</b>"));
         assert!(html.contains("Nothing urgent"));
+    }
+
+    #[test]
+    fn npm_without_its_global_directory_is_not_an_all_clear() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.npm.global_dir_problem = Some("`npm root -g` failed: npm error code EACCES".into());
+        assert!(report.incomplete());
+        let html = report.to_html();
+        for text in [
+            "<a href=\"#npm\">npm <b class=\"warn\">incomplete</b>",
+            "this list may be incomplete: npm's own global directory could not be located.",
+            "npm&#39;s own global directory could not be located, so it may not have been scanned: \
+             `npm root -g` failed: npm error code EACCES.",
+            "No malicious or suspicious package in the directories that were scanned.",
+        ] {
+            assert!(html.contains(text), "{text}\n{html}");
+        }
+        assert!(!html.contains("No malicious or suspicious package found."));
     }
 
     #[test]

@@ -50,7 +50,7 @@ fn verdict(roots: &[PathBuf], problem: Option<String>) -> Outcome {
 /// found" is no verdict when npm's own global directory may not have been
 /// among them.
 fn incomplete(mut outcome: Outcome, problem: &str) -> Outcome {
-    let note = format!("npm's own global directory could not be located, so it may not have been scanned: {problem}.");
+    let note = npm::unlocated_note(problem);
     if outcome.status == Status::Pass {
         Outcome::unknown(format!("{} {note}", outcome.detail))
     } else {
@@ -82,7 +82,7 @@ fn outcome(scan: &npm::Scan) -> Outcome {
         }
         if !unread.is_empty() {
             detail.push(format!(
-                "Not checked, package.json too large to read: {}.",
+                "Not checked, package.json too large or too deeply nested to read: {}.",
                 unread.join(", ")
             ));
         }
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(outcome_unread.status, Status::Warn);
         assert_eq!(
             outcome_unread.detail,
-            "Not checked, package.json too large to read: event-stream."
+            "Not checked, package.json too large or too deeply nested to read: event-stream."
         );
 
         let both = npm::Scan {
@@ -234,7 +234,7 @@ mod tests {
             "{detail}"
         );
         assert!(
-            detail.ends_with("Not checked, package.json too large to read: event-stream."),
+            detail.ends_with("Not checked, package.json too large or too deeply nested to read: event-stream."),
             "{detail}"
         );
     }

@@ -423,7 +423,12 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             ),
         ),
         (
-            if malware > 0 { Tone::Bad } else { Tone::Good },
+            match (malware, &scan.global_dir_problem) {
+                (1.., _) => Tone::Bad,
+                // npm's own global directory may not have been scanned.
+                (0, Some(_)) => Tone::Warn,
+                (0, None) => Tone::Good,
+            },
             format!(
                 "{malware} malicious · {} suspicious install scripts",
                 scan.suspicious().count() - unread
@@ -433,7 +438,7 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
     if unread > 0 {
         headline.push((
             Tone::Warn,
-            format!("{unread} packages not checked: their package.json is too large to read"),
+            format!("{unread} packages not checked: their package.json is too large or too deeply nested to read"),
         ));
     }
     if let Some(Err(err)) = lookup {
@@ -442,12 +447,12 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             format!("OSV lookup failed, so the scan is incomplete: {err}"),
         ));
     }
-    ResultView::new(
-        Module::Npm,
-        headline,
-        rows,
-        "No malicious or suspicious packages found.",
-    )
+    headline.extend(scan.global_dir_note().map(|note| (Tone::Warn, note)));
+    let empty = match scan.global_dir_problem {
+        Some(_) => "No malicious or suspicious packages in the directories that were scanned.",
+        None => "No malicious or suspicious packages found.",
+    };
+    ResultView::new(Module::Npm, headline, rows, empty)
 }
 
 fn secrets_view(scan: &secrets::Scan) -> ResultView {
@@ -673,8 +678,9 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
         }
         Module::Npm => {
             progress.stage("Looking for node_modules directories");
-            let roots = npm::all_roots(&runner);
+            let (roots, unlocated) = npm::all_roots(&runner);
             let mut scan = npm::scan_with(&roots, progress);
+            scan.global_dir_problem = unlocated;
             let lookup = online.then(|| scan.lookup_osv(progress));
             Outcome::View(npm_view(&scan, lookup))
         }
@@ -1645,6 +1651,32 @@ mod tests {
         );
         assert!(npm_view(&scan, None).headline[0].1.contains("online lookups are off"));
         assert!(npm_view(&scan, Some(Ok(()))).headline[0].1.contains("OSV.dev"));
+    }
+
+    #[test]
+    fn npm_view_is_not_green_when_npm_could_not_name_its_global_directory() {
+        let mut scan = npm::scan(&[]);
+        assert_eq!(npm_view(&scan, None).headline[1].0, Tone::Good);
+        assert_eq!(
+            npm_view(&scan, None).empty,
+            "No malicious or suspicious packages found."
+        );
+        scan.global_dir_problem = Some("`npm root -g` failed: npm error".into());
+        let view = npm_view(&scan, None);
+        assert_eq!(view.headline[1].0, Tone::Warn);
+        assert_eq!(
+            view.headline.last().unwrap(),
+            &(
+                Tone::Warn,
+                "npm's own global directory could not be located, so it may not have been scanned: \
+                 `npm root -g` failed: npm error."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            view.empty,
+            "No malicious or suspicious packages in the directories that were scanned."
+        );
     }
 
     #[test]

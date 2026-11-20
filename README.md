@@ -123,7 +123,7 @@ means the advice points to the place in System Settings (or Recovery).
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
 | 2 | Usage or configuration error |
-| 3 | The scan is incomplete: `--npm` / `--vulns` / `--report` with `--online`: a lookup failed; `--vulns` / `--report`: a lockfile could not be read (no permission, over 64 MB, not UTF-8/UTF-16 text); `--secrets` / `--report`: git could not tell whether a file with a secret is tracked |
+| 3 | The scan is incomplete: `--npm` / `--vulns` / `--report` with `--online`: a lookup failed; `--vulns` / `--report`: a lockfile could not be read (no permission, over 64 MB, not UTF-8/UTF-16 text); `--secrets` / `--report`: git could not tell whether a file with a secret is tracked; `--npm` / `--report`: `npm root -g` failed, so npm's own global directory may not have been scanned |
 
 The scan modes use 1 for their own "found something" condition (described in
 each section) and 3 when part of the scan could not be done and nothing was
@@ -273,7 +273,9 @@ The exit code is 1 when a confirmed malicious package is found; heuristic
 script warnings do not affect it. Otherwise it is 3 when the `--online` OSV
 lookup failed, so the packages it did not answer for were checked against the
 built-in list only; malicious package records found before the failure are
-still reported. If something turns up: remove the package or
+still reported. It is also 3 when `npm root -g` failed: a custom npm `prefix`
+is found only through it, so npm's own global directory may not have been
+scanned, and the report says so. If something turns up: remove the package or
 move to a clean version, delete and reinstall `node_modules`, and rotate the
 npm / GitHub / cloud credentials on that machine.
 
@@ -314,8 +316,8 @@ history as usual. The path options narrow the scans to one project; with
 `--vulns-path`, macOS, apps and Homebrew are not scanned. The exit code is 1
 when the audit fails or a scan finds malware, a known-exploited vulnerability
 or a secret in a git-tracked file; otherwise 3 when part of a scan could not
-be done (an online lookup failed, a lockfile could not be read, or git could
-not tell whether a file with a secret is tracked).
+be done (an online lookup failed, a lockfile could not be read, git could
+not tell whether a file with a secret is tracked, or `npm root -g` failed).
 
 ## History and comparison
 

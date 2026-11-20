@@ -60,7 +60,7 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  the scan is incomplete: an online lookup failed (--npm / --vulns / --report with --online),\n     a lockfile could not be read (--vulns / --report), or git could not tell whether\n     a file with a secret is tracked (--secrets / --report)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  the scan is incomplete: an online lookup failed (--npm / --vulns / --report with --online),\n     a lockfile could not be read (--vulns / --report), or git could not tell whether\n     a file with a secret is tracked (--secrets / --report),\n     or npm root -g failed (--npm / --report)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
 ,
     // The path options of a scan also narrow that scan inside `--report`.
     group(ArgGroup::new("npm_scope").args(["npm", "report"])),
@@ -313,7 +313,8 @@ fn save_history(history_file: Option<PathBuf>, report: &Report) {
 /// `--report FILE`: runs the audit and every scan, and writes one HTML page.
 /// The exit code is 1 when the audit fails (as without `--report`) or a scan
 /// finds malware, a known-exploited vulnerability or a secret in a file
-/// tracked in git; otherwise `EXIT_INCOMPLETE` when an online lookup failed.
+/// tracked in git; otherwise `EXIT_INCOMPLETE` when part of a scan could not
+/// be done (e.g. an online lookup failed).
 fn run_report(
     cli: &Cli,
     path: &Path,
@@ -328,9 +329,9 @@ fn run_report(
         [] => lockfiles::default_files(),
         paths => vulns_paths(paths)?,
     };
-    let npm_roots = match cli.npm_path.as_slice() {
+    let (npm_roots, npm_unlocated) = match cli.npm_path.as_slice() {
         [] => npm::all_roots(runner),
-        paths => npm_roots(paths)?,
+        paths => (npm_roots(paths)?, None),
     };
     let secret_files = match cli.secrets_path.as_slice() {
         [] => secrets::default_files(),
@@ -364,6 +365,7 @@ fn run_report(
     vulns.skipped = skipped;
 
     let mut npm = npm::scan_with(&npm_roots, &progress);
+    npm.global_dir_problem = npm_unlocated;
     let npm_lookup = cli.online.then(|| npm.lookup_osv(&progress));
 
     let secrets = secrets::scan_with(&secret_files, &progress);
@@ -442,17 +444,21 @@ fn cache_dir() -> Result<PathBuf, String> {
 
 /// `--npm`: scans installed npm packages in detail. The exit code is 1 if a
 /// confirmed malicious package was found; heuristic script warnings do not
-/// affect the code. A failed `--online` lookup gives `EXIT_INCOMPLETE`.
+/// affect the code. A failed `--online` lookup, or a failed `npm root -g`
+/// (npm's own global directory may then be missing), gives `EXIT_INCOMPLETE`.
 fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let format = text_or_json(cli, "--npm")?;
 
-    let roots = if cli.npm_path.is_empty() {
+    let (roots, unlocated) = if cli.npm_path.is_empty() {
         npm::all_roots(&SystemRunner::new())
     } else {
-        npm_roots(&cli.npm_path)?
+        (npm_roots(&cli.npm_path)?, None)
     };
 
     let mut scan = npm::scan(&roots);
+    // A custom npm prefix may not have been scanned: no all-clear then.
+    scan.global_dir_problem = unlocated;
+    let unlocated = usize::from(scan.global_dir_problem.is_some());
 
     // If OSV cannot be reached, the local results are still shown.
     let mut online = false;
@@ -481,13 +487,20 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
             "{} malicious, {} suspicious{}",
             report.scan.malware().count(),
             report.scan.suspicious().count(),
-            incomplete_note(&[(usize::from(incomplete), "OSV lookup failed", "OSV lookup failed")])
+            incomplete_note(&[
+                (usize::from(incomplete), "OSV lookup failed", "OSV lookup failed"),
+                (
+                    unlocated,
+                    "npm global directory not located",
+                    "npm global directory not located"
+                )
+            ])
         ),
         _ => report.to_text(),
     };
     emit(cli, &rendered)?;
 
-    Ok(match (found_malware, incomplete) {
+    Ok(match (found_malware, incomplete || unlocated > 0) {
         (true, _) => ExitCode::FAILURE,
         (false, true) => ExitCode::from(EXIT_INCOMPLETE),
         (false, false) => ExitCode::SUCCESS,
