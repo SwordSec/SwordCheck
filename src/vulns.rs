@@ -880,6 +880,9 @@ struct Advisory {
 }
 
 impl Advisory {
+    /// The fixed versions an upgrade from `package` can reach. An advisory
+    /// with one range per release line also lists the fixes of older lines
+    /// (Django: 3.2.20, 4.1.10, 4.2.3); those do not help someone on 4.2.0.
     fn fixed_for(&self, package: &Package) -> Vec<String> {
         let fixed: BTreeSet<&str> = self
             .fixed
@@ -888,9 +891,30 @@ impl Advisory {
                 ecosystem == package.ecosystem && same_package(ecosystem, name, &package.name)
             })
             .map(|(_, _, version)| version.as_str())
+            // A version this cannot compare is kept rather than guessed at.
+            .filter(|version| newer(version, &package.version) != Some(false))
             .collect();
         fixed.into_iter().map(str::to_string).collect()
     }
+}
+
+/// Is `a` a later version than `b`? Only plain dotted numbers are compared
+/// (`1.10` > `1.9`, `v1.2` = `1.2.0`); `None` for anything else, such as a
+/// pre-release or a post-release suffix.
+fn newer(a: &str, b: &str) -> Option<bool> {
+    fn parts(version: &str) -> Option<Vec<u64>> {
+        let mut parts = version
+            .strip_prefix('v')
+            .unwrap_or(version)
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect::<Option<Vec<u64>>>()?;
+        while parts.last() == Some(&0) {
+            parts.pop();
+        }
+        Some(parts)
+    }
+    Some(parts(a)? > parts(b)?)
 }
 
 /// Do two names refer to the same package? PyPI treats `-`, `_` and `.` as
@@ -1746,6 +1770,37 @@ mod tests {
             }
         );
         assert_eq!((hits[1].package, hits[1].id.as_str()), (1, "MAL-1"));
+    }
+
+    #[test]
+    fn fixed_versions_are_upgrades_from_the_installed_one() {
+        // One range per release line, as in the Django advisories.
+        let text = r#"{"id": "GHSA-1", "affected": [
+            {"package": {"name": "django", "ecosystem": "PyPI"},
+             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "3.2"}, {"fixed": "3.2.20"}]}]},
+            {"package": {"name": "django", "ecosystem": "PyPI"},
+             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "4.0"}, {"fixed": "4.1.10"}]}]},
+            {"package": {"name": "django", "ecosystem": "PyPI"},
+             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "4.2"}, {"fixed": "4.2.3"}]}]}]}"#;
+        let advisory = parse_advisory(text).unwrap();
+        let fixed = |version: &str| {
+            advisory.fixed_for(&Package {
+                ecosystem: "PyPI",
+                name: "Django".to_string(),
+                version: version.to_string(),
+            })
+        };
+        assert_eq!(fixed("3.2.1"), ["3.2.20", "4.1.10", "4.2.3"]);
+        assert_eq!(fixed("4.2.0"), ["4.2.3"]);
+        assert_eq!(fixed("4.1.10"), ["4.2.3"], "the installed version is not its own fix");
+        assert!(fixed("5.0").is_empty(), "no fix on this line");
+        // A version that cannot be compared keeps every fix.
+        assert_eq!(fixed("4.2.0rc1"), ["3.2.20", "4.1.10", "4.2.3"]);
+
+        assert_eq!(newer("1.10", "1.9.9"), Some(true));
+        assert_eq!(newer("v1.2", "1.2.0"), Some(false), "equal");
+        assert_eq!(newer("1.2.0-beta.1", "1.1"), None);
+        assert_eq!(newer("1.0", ""), None);
     }
 
     #[test]

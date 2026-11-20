@@ -612,22 +612,23 @@ impl FullReport {
         }
         for finding in scan.malware().chain(scan.suspicious()) {
             let malware = finding.kind.is_malware();
-            let advice = if malware {
-                "Remove the package or move to a clean version, reinstall node_modules, and rotate the npm, GitHub and cloud credentials on this Mac."
-            } else {
-                "Heuristic warning: read the install script and decide."
+            let tag = match finding.kind {
+                _ if malware => "Malware",
+                npm::Kind::Unread => "Unread",
+                _ => "Script",
             };
             let body = format!(
-                "<p>{} · found in {}</p>{}<p class=\"advice\">{advice}</p>",
+                "<p>{} · found in {}</p>{}<p class=\"advice\">{}</p>",
                 finding.kind.label().to_lowercase(),
                 plural(finding.count, "install", "installs"),
-                self.paths(&finding.paths, finding.count)
+                self.paths(&finding.paths, finding.count),
+                finding.kind.advice()
             );
             write_row(
                 out,
                 &Row {
                     tone: if malware { Tone::Crit } else { Tone::Warn },
-                    tag: if malware { "Malware" } else { "Script" },
+                    tag,
                     title: escape(&npm_title(finding)),
                     sub: escape(&finding.reason),
                     body,
@@ -1473,6 +1474,16 @@ mod tests {
             "the marker stays inside the scale"
         );
         assert!(scored(0, 100, None).contains("<rect x=\"0\" y=\"4\""));
+    }
+
+    #[test]
+    fn unread_npm_packages_get_their_own_tag_and_advice() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.npm.findings = vec![npm_finding(npm::Kind::Unread, "event-stream", "", 1)];
+        let html = report.to_html();
+        assert!(html.contains("<span class=\"tag\">Unread</span>"));
+        assert!(html.contains(&escape(npm::Kind::Unread.advice())));
+        assert!(!html.contains("Heuristic warning"));
     }
 
     #[test]

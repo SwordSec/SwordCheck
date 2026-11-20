@@ -45,9 +45,11 @@ pub struct Change {
 }
 
 impl Change {
-    /// Is the change for the better? (Pass is best, Fail is worst.)
+    /// Is the change for the better? (Pass is best, Fail is worst.) A check
+    /// that can no longer be evaluated has not improved: nothing shows that
+    /// the problem was fixed.
     pub fn improved(&self) -> bool {
-        rank(self.to) > rank(self.from)
+        self.to != Status::Unknown && rank(self.to) > rank(self.from)
     }
 }
 
@@ -158,6 +160,21 @@ mod tests {
             to: Status::Warn,
         };
         assert!(!change.improved());
+    }
+
+    #[test]
+    fn a_check_that_cannot_be_evaluated_has_not_improved() {
+        let change = |from, to| Change {
+            id: "x",
+            name: "x",
+            from,
+            to,
+        };
+        assert!(!change(Status::Fail, Status::Unknown).improved());
+        assert!(!change(Status::Warn, Status::Unknown).improved());
+        assert!(!change(Status::Pass, Status::Unknown).improved());
+        assert!(change(Status::Unknown, Status::Pass).improved());
+        assert!(!change(Status::Unknown, Status::Fail).improved());
     }
 
     #[test]
