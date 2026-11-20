@@ -4,6 +4,7 @@
 use crate::checks::{CheckResult, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Maximum number of records kept in the file.
@@ -65,9 +66,19 @@ fn rank(status: Status) -> u8 {
 /// Path of the history file. The directory can be changed with the
 /// `SWORDCHECK_HOME` environment variable (handy in tests and experiments).
 pub fn history_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("SWORDCHECK_HOME") {
+    path_from(std::env::var_os("SWORDCHECK_HOME"), std::env::var_os("HOME"))
+}
+
+/// `history_path` with the environment passed in. An empty `SWORDCHECK_HOME`
+/// counts as unset, and an empty or relative `HOME` as no home at all: either
+/// would put the history (and the cache next to it) in whatever folder the
+/// tool happens to be run from.
+fn path_from(swordcheck_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let dir = match swordcheck_home.filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => Path::new(&std::env::var_os("HOME")?).join(".swordcheck"),
+        None => Some(PathBuf::from(home?))
+            .filter(|home| home.is_absolute())?
+            .join(".swordcheck"),
     };
     Some(dir.join("history.json"))
 }
@@ -175,6 +186,23 @@ mod tests {
         assert!(!change(Status::Pass, Status::Unknown).improved());
         assert!(change(Status::Unknown, Status::Pass).improved());
         assert!(!change(Status::Unknown, Status::Fail).improved());
+    }
+
+    #[test]
+    fn an_empty_or_relative_home_gives_no_history_path() {
+        let os = |text: &str| Some(OsString::from(text));
+        let home = Some(PathBuf::from("/Users/a/.swordcheck/history.json"));
+        assert_eq!(path_from(None, os("/Users/a")), home);
+        assert_eq!(
+            path_from(os(""), os("/Users/a")),
+            home,
+            "an empty SWORDCHECK_HOME is unset"
+        );
+        assert_eq!(path_from(None, os("")), None);
+        assert_eq!(path_from(None, os("relative")), None);
+        assert_eq!(path_from(None, None), None);
+        // An explicit SWORDCHECK_HOME is used as given.
+        assert_eq!(path_from(os("data"), os("")), Some(PathBuf::from("data/history.json")));
     }
 
     #[test]

@@ -688,10 +688,10 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
 
 /// Saves a dashboard audit to the history, like the command line does, and
 /// describes how it compares with the previous one. `path` is the history
-/// file (`history::history_path()`), `None` when HOME is not set.
+/// file (`history::history_path()`), `None` when HOME is not set to an absolute path.
 fn record_audit(path: Option<&Path>, results: &[CheckResult], os_version: &str) -> String {
     let Some(path) = path else {
-        return "history unavailable (HOME is not set)".to_string();
+        return "history unavailable (HOME is not set to an absolute path)".to_string();
     };
     // Like the command line: a run in which nothing could be evaluated has no
     // score worth comparing or saving.
@@ -1914,7 +1914,7 @@ mod tests {
         assert_eq!(scored, [50, 100]);
         assert_eq!(
             record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26"),
-            "history unavailable (HOME is not set)"
+            "history unavailable (HOME is not set to an absolute path)"
         );
     }
 

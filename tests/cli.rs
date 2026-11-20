@@ -763,3 +763,35 @@ fn a_failed_osv_request_keeps_the_malware_found_before_it() {
         "{err}"
     );
 }
+
+#[test]
+fn an_empty_or_relative_home_never_puts_the_history_in_the_current_folder() {
+    let home = Home::new("relative-home");
+    let work = home.path("project");
+    std::fs::create_dir_all(&work).unwrap();
+    for value in ["", "relative"] {
+        let run = |args: &[&str]| {
+            home.command(args)
+                .env("HOME", value)
+                .env_remove("SWORDCHECK_HOME")
+                .current_dir(&work)
+                .output()
+                .unwrap()
+        };
+        let history = run(&["--history"]);
+        assert_eq!(history.status.code(), Some(2), "HOME={value:?}");
+        assert!(
+            stderr(&history).contains("history directory (HOME is not set to an absolute path)"),
+            "{}",
+            stderr(&history)
+        );
+        let vulns = run(&["--vulns", "--online", "--vulns-path", str(&work)]);
+        assert_eq!(vulns.status.code(), Some(2), "HOME={value:?}");
+        assert!(stderr(&vulns).contains("cache directory (HOME is not set to an absolute path)"));
+        let audit = run(&[]);
+        assert!(matches!(audit.status.code(), Some(0 | 1)), "HOME={value:?}");
+        // (npm, run by the supply-chain check, may still log under $HOME.)
+        let history = work.join(value).join(".swordcheck");
+        assert!(!history.exists(), "{} was created", history.display());
+    }
+}

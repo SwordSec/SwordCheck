@@ -326,7 +326,11 @@ difference and the checks whose status changed.
 - `--history` : list past audits
 - `--no-history` : do not save or compare
 - Partial runs with `--only` / `--skip` are not saved
-- The `SWORDCHECK_HOME` environment variable changes the storage directory
+- The `SWORDCHECK_HOME` environment variable changes the storage directory.
+  Without it, an empty or relative `HOME` means no history, never one in the
+  current folder.
+- A run that ends while another one is scanning (`--report` takes minutes)
+  is kept: the file is read again just before saving.
 
 ## Configuration (`audit.toml`)
 
