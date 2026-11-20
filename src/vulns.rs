@@ -2036,6 +2036,17 @@ mod tests {
         assert_eq!(kept.cves, ["CVE-2024-1", "CVE-2024-2"]);
         assert!(kept.kev.is_some(), "the KEV status must survive the merge");
         assert_eq!(kept.epss, Some(0.9));
+
+        // When both copies are in KEV, a ransomware entry wins over a plain one.
+        let mut plain = finding("pkg", Severity::High, None, true);
+        plain.cves = vec!["CVE-2024-2".to_string()];
+        let mut ransomware = finding("pkg", Severity::Unknown, None, true);
+        ransomware.id = "GO-1".to_string();
+        ransomware.cves = vec!["CVE-2024-2".to_string()];
+        ransomware.kev.as_mut().unwrap().ransomware = true;
+        let merged = merge_duplicates(vec![plain, ransomware]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].kev.as_ref().unwrap().ransomware);
     }
 
     #[test]

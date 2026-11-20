@@ -108,11 +108,11 @@ mod tests {
                         stream.set_nonblocking(false).unwrap();
                         let mut request = Vec::new();
                         let mut buffer = [0; 4096];
-                        while !request.windows(4).any(|end| end == b"\r\n\r\n") {
-                            match stream.read(&mut buffer) {
-                                Ok(0) | Err(_) => break,
-                                Ok(read) => request.extend_from_slice(&buffer[..read]),
-                            }
+                        // Read until the end of the headers, or until the client stops.
+                        while !request.windows(4).any(|end| end == b"\r\n\r\n")
+                            && let Ok(read @ 1..) = stream.read(&mut buffer)
+                        {
+                            request.extend_from_slice(&buffer[..read]);
                         }
                         requests.push(String::from_utf8_lossy(&request).into_owned());
                         let _ = stream.write_all(response(port).as_bytes());

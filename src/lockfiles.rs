@@ -1448,4 +1448,16 @@ mod tests {
         assert_eq!(decode(vec![0xFF, 0xFE, b'a']), None);
         assert_eq!(decode(vec![b'a', 0xFF]), None);
     }
+
+    #[test]
+    fn parse_file_reads_a_file_with_a_byte_order_mark() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-lockfiles-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("requirements.txt");
+        std::fs::write(&path, "\u{feff}requests==2.19.0\n").unwrap();
+        let lockfile = parse_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        let packages: Vec<Package> = lockfile.expect("parsed").packages.into_iter().collect();
+        assert_eq!(names(&packages), ["PyPI:requests@2.19.0"]);
+    }
 }

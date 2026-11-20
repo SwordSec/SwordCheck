@@ -995,6 +995,23 @@ mod tests {
     }
 
     #[test]
+    fn text_report_marks_an_unknown_version() {
+        let scan = Scan {
+            findings: vec![Finding {
+                kind: Kind::Script,
+                package: "no-version".into(),
+                version: String::new(),
+                reason: "postinstall: directly executes a script it downloads".into(),
+                count: 1,
+                paths: vec![PathBuf::from("/x/node_modules/no-version")],
+            }],
+            ..Scan::default()
+        };
+        let text = NpmReport::new(String::new(), false, scan).to_text();
+        assert!(text.contains("no-version@?"), "{text}");
+    }
+
+    #[test]
     fn project_search_skips_hidden_dirs_and_nested_node_modules() {
         let temp = TempDir::new("walk");
         temp.package("app/node_modules/a/node_modules/b", pkg("b", "1.0.0"));
