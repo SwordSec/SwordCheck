@@ -89,6 +89,21 @@ impl Report {
         }
     }
 
+    /// When nothing failed or warned but some checks could not be evaluated:
+    /// says so, because their safeguards are not confirmed.
+    fn unconfirmed(&self) -> Option<String> {
+        match self.summary.unknown {
+            0 => None,
+            1 => Some(
+                "Nothing failed, but 1 check could not be evaluated (UNKNOWN): that safeguard is not confirmed."
+                    .to_string(),
+            ),
+            count => Some(format!(
+                "Nothing failed, but {count} checks could not be evaluated (UNKNOWN): those safeguards are not confirmed."
+            )),
+        }
+    }
+
     /// Fail/Warn checks that have no exception defined.
     fn issues(&self) -> impl Iterator<Item = &CheckResult> {
         self.checks.iter().filter(|check| check.is_issue())
@@ -191,15 +206,12 @@ impl Report {
         let _ = writeln!(out);
         let issues: Vec<&CheckResult> = self.issues().collect();
         if issues.is_empty() {
-            let _ = writeln!(
-                out,
-                "{}",
-                if self.scorable {
-                    "Great! All audited safeguards are in place.".green()
-                } else {
-                    "No check could be evaluated, so there is nothing to score.".yellow()
-                }
-            );
+            let verdict = match (self.scorable, self.unconfirmed()) {
+                (false, _) => "No check could be evaluated, so there is nothing to score.".yellow(),
+                (true, Some(unconfirmed)) => unconfirmed.yellow(),
+                (true, None) => "Great! All audited safeguards are in place.".green(),
+            };
+            let _ = writeln!(out, "{verdict}");
         } else {
             let _ = writeln!(out, "{}", "Recommendations".bold());
             for issue in issues {
@@ -331,12 +343,11 @@ impl Report {
                     .unwrap_or_default()
             );
         }
-        let advice = if !advice.is_empty() {
-            format!("<ul>\n{advice}</ul>")
-        } else if self.scorable {
-            "<p>All audited safeguards are in place.</p>".to_string()
-        } else {
-            "<p>No check could be evaluated, so there is nothing to score.</p>".to_string()
+        let advice = match (advice.is_empty(), self.scorable, self.unconfirmed()) {
+            (false, _, _) => format!("<ul>\n{advice}</ul>"),
+            (true, false, _) => "<p>No check could be evaluated, so there is nothing to score.</p>".to_string(),
+            (true, true, Some(unconfirmed)) => format!("<p>{}</p>", escape_html(&unconfirmed)),
+            (true, true, None) => "<p>All audited safeguards are in place.</p>".to_string(),
         };
 
         let mut trend = String::new();
@@ -452,8 +463,23 @@ pub fn text_line(check: &CheckResult) -> String {
         paint(icon),
         paint(&label),
         check.name,
-        detail_with_exemption(check)
+        printable(&detail_with_exemption(check))
     )
+}
+
+/// Details can carry names from the machine, such as a launch item's file
+/// name, which may be hostile: control characters are shown escaped so they
+/// cannot drive the terminal (e.g. erase the warning that names the item).
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// "EXCEPTION" for exempted checks, the status label for the rest.
@@ -658,6 +684,49 @@ mod tests {
                 .to_html()
                 .contains("<p>Score: 50 → n/a (previous: 2026-11-01 09:00)</p>")
         );
+    }
+
+    #[test]
+    fn text_report_does_not_pass_control_characters_to_the_terminal() {
+        // A launch item's file name ends up in the detail; it must not be able
+        // to move the cursor and erase the warning that names it.
+        colored::control::set_override(false);
+        let mut warn = result("launch-items", Status::Warn, 10);
+        warn.detail = "Suspicious items: helper\u{1b}[1A\u{1b}[2K\r.plist (runs from /tmp).".into();
+        let text = Report::new("2026-11-20T10:00:00+03:00".into(), "macOS 26".into(), vec![warn], None)
+            .render(Format::Text, false);
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'), "{text:?}");
+        assert!(
+            text.contains(r"helper\u{1b}[1A\u{1b}[2K\r.plist (runs from /tmp)."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_all_clear_while_checks_are_unknown() {
+        colored::control::set_override(false);
+        let report = |checks| Report::new("2026-11-20T10:00:00+03:00".into(), "macOS 26".into(), checks, None);
+        let one = report(vec![
+            result("filevault", Status::Unknown, 25),
+            result("sip", Status::Pass, 20),
+        ]);
+        for rendered in [one.render(Format::Text, false), one.render(Format::Html, false)] {
+            assert!(!rendered.contains("All audited safeguards are in place"), "{rendered}");
+            assert!(rendered.contains("Nothing failed, but 1 check could not be evaluated (UNKNOWN)"));
+        }
+        let two = report(vec![
+            result("filevault", Status::Unknown, 25),
+            result("xprotect", Status::Unknown, 5),
+            result("sip", Status::Pass, 20),
+        ]);
+        assert!(
+            two.render(Format::Text, false)
+                .contains("2 checks could not be evaluated")
+        );
+        let pass = report(vec![result("sip", Status::Pass, 20)]);
+        for rendered in [pass.render(Format::Text, false), pass.render(Format::Html, false)] {
+            assert!(rendered.contains("All audited safeguards are in place"), "{rendered}");
+        }
     }
 
     #[test]
