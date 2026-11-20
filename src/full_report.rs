@@ -153,19 +153,23 @@ impl FullReport {
                     .iter()
                     .filter(|item| !item.exploited.is_empty())
                     .count();
-            let tone = match (self.vulns.exploited(), count) {
-                (1.., _) => Tone::Crit,
-                (0, 1..) => Tone::Warn,
-                _ => Tone::Ok,
-            };
-            (tone, count.to_string())
+            // A failed lookup may hide findings: that is never a clean 0.
+            let incomplete = !self.vulns.warnings.is_empty();
+            match (self.vulns.exploited(), count, incomplete) {
+                (1.., _, _) => (Tone::Crit, count.to_string()),
+                (0, 1.., _) => (Tone::Warn, count.to_string()),
+                (0, 0, true) => (Tone::Warn, "incomplete".to_string()),
+                (0, 0, false) => (Tone::Ok, "0".to_string()),
+            }
         } else {
             (Tone::Unknown, "offline".to_string())
         };
-        let npm = match (self.npm.malware().count(), self.npm.findings.len()) {
-            (1.., count) => (Tone::Crit, count),
-            (0, count @ 1..) => (Tone::Warn, count),
-            _ => (Tone::Ok, 0),
+        let npm_incomplete = matches!(self.npm_lookup, Some(Err(_)));
+        let npm = match (self.npm.malware().count(), self.npm.findings.len(), npm_incomplete) {
+            (1.., count, _) => (Tone::Crit, count.to_string()),
+            (0, count @ 1.., _) => (Tone::Warn, count.to_string()),
+            (0, 0, true) => (Tone::Warn, "incomplete".to_string()),
+            (0, 0, false) => (Tone::Ok, "0".to_string()),
         };
         let secrets = self.secrets.unique_secrets();
         let secrets_tone = match (self.secrets.tracked().count(), secrets) {
@@ -178,7 +182,7 @@ impl FullReport {
             ("first", "Fix first", first_tone, priorities.to_string()),
             ("audit", "Settings", grade_tone(&self.audit), self.score_text()),
             ("vulns", "Vulnerabilities", vulns.0, vulns.1),
-            ("npm", "npm", npm.0, npm.1.to_string()),
+            ("npm", "npm", npm.0, npm.1),
             ("secrets", "Secrets", secrets_tone, secrets.to_string()),
         ];
         out.push_str("<nav class=\"jump\" aria-label=\"Sections\">");
@@ -251,7 +255,12 @@ impl FullReport {
         );
 
         out.push_str("<div class=\"panel todo\">\n<h2>Fix these first</h2>\n");
-        if priorities.is_empty() {
+        if priorities.is_empty() && self.incomplete() {
+            out.push_str(
+                "<p>No urgent finding in what could be checked, but an online lookup failed, so this list may be \
+                 incomplete: see the notes below.</p>\n",
+            );
+        } else if priorities.is_empty() {
             out.push_str(
                 "<p>Nothing urgent: no failing check, malware, known-exploited vulnerability or secret in a git-tracked file.</p>\n",
             );
@@ -286,7 +295,21 @@ impl FullReport {
                 why: "Malicious npm package. Rotate the npm, GitHub and cloud credentials on this Mac.".to_string(),
             });
         }
-        for finding in self.vulns.findings.iter().filter(|finding| finding.malware) {
+        // A malicious npm package is usually both installed and pinned in a
+        // lockfile; the npm entry above already says to remove it.
+        let listed = |finding: &vulns::Finding| {
+            finding.ecosystem == "npm"
+                && self
+                    .npm
+                    .malware()
+                    .any(|npm| npm.package == finding.package && npm.version == finding.version)
+        };
+        for finding in self
+            .vulns
+            .findings
+            .iter()
+            .filter(|finding| finding.malware && !listed(finding))
+        {
             list.push(Priority {
                 action: format!(
                     "Remove <strong>{} {}</strong>.",
@@ -474,10 +497,12 @@ impl FullReport {
 
         out.push_str("<div class=\"list\">\n");
         if rows.is_empty() {
-            let empty = if self.online {
-                "No known vulnerability affects the scanned versions."
-            } else {
-                "Nothing was looked up."
+            let empty = match (self.online, scan.warnings.is_empty()) {
+                (false, _) => "Nothing was looked up.",
+                (true, true) => "No known vulnerability affects the scanned versions.",
+                (true, false) => {
+                    "Nothing found in what could be looked up; the failed lookups above may hide findings."
+                }
             };
             let _ = writeln!(out, "<p class=\"empty\">{empty}</p>");
         }
@@ -577,8 +602,13 @@ impl FullReport {
             );
         }
         out.push_str("<div class=\"list\">\n");
-        if scan.findings.is_empty() {
-            out.push_str("<p class=\"empty\">No malicious or suspicious package found.</p>\n");
+        match (scan.findings.is_empty(), &self.npm_lookup) {
+            (true, Some(Err(_))) => out.push_str(
+                "<p class=\"empty\">No malicious or suspicious package in the built-in list; \
+                 packages known only to OSV.dev were not checked.</p>\n",
+            ),
+            (true, _) => out.push_str("<p class=\"empty\">No malicious or suspicious package found.</p>\n"),
+            (false, _) => {}
         }
         for finding in scan.malware().chain(scan.suspicious()) {
             let malware = finding.kind.is_malware();
@@ -1568,6 +1598,70 @@ mod tests {
             finding.mode = None;
         }
         assert!(!report.to_html().contains("<dt>File mode</dt>"));
+    }
+
+    #[test]
+    fn failed_lookups_never_read_as_all_clear() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.online = true;
+        report.vulns.online = true;
+        report.vulns.warnings = vec!["CISA KEV download failed: timeout".into()];
+        report.npm_lookup = Some(Err("curl: (7) Failed to connect".into()));
+        let html = report.to_html();
+        for text in [
+            "<a href=\"#vulns\">Vulnerabilities <b class=\"warn\">incomplete</b>",
+            "<a href=\"#npm\">npm <b class=\"warn\">incomplete</b>",
+            "an online lookup failed, so this list may be incomplete",
+            "the failed lookups above may hide findings",
+            "packages known only to OSV.dev were not checked",
+        ] {
+            assert!(html.contains(text), "{text}");
+        }
+        for claim in [
+            "Nothing urgent",
+            "No known vulnerability affects",
+            "No malicious or suspicious package found.",
+        ] {
+            assert!(!html.contains(claim), "{claim}");
+        }
+
+        // Once the lookups work again, the all-clear is back.
+        report.vulns.warnings.clear();
+        report.npm_lookup = Some(Ok(()));
+        let html = report.to_html();
+        assert!(html.contains("<a href=\"#vulns\">Vulnerabilities <b class=\"ok\">0</b>"));
+        assert!(html.contains("<a href=\"#npm\">npm <b class=\"ok\">0</b>"));
+        assert!(html.contains("Nothing urgent"));
+    }
+
+    #[test]
+    fn a_malicious_npm_package_is_listed_once() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        // Installed (npm scan) and pinned in a lockfile (OSV MAL record).
+        report.npm.findings = vec![npm_finding(npm::Kind::Osv, "event-stream", "3.3.6", 1)];
+        let mut pinned = vuln("event-stream", vulns::Severity::Critical);
+        pinned.version = "3.3.6".into();
+        pinned.malware = true;
+        let mut older = pinned.clone();
+        older.version = "3.3.5".into();
+        let mut pypi = pinned.clone();
+        pypi.ecosystem = "PyPI";
+        report.vulns.findings = vec![pinned, older, pypi];
+        let removals: Vec<String> = report
+            .priorities()
+            .into_iter()
+            .map(|priority| priority.action)
+            .filter(|action| action.starts_with("Remove"))
+            .collect();
+        assert_eq!(
+            removals,
+            [
+                "Remove <strong>event-stream@3.3.6</strong>.",
+                "Remove <strong>event-stream 3.3.5</strong>.",
+                "Remove <strong>event-stream 3.3.6</strong>.",
+            ],
+            "the npm copy covers the same version once; another version or ecosystem stays"
+        );
     }
 
     #[test]

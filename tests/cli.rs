@@ -249,6 +249,78 @@ fn report_rejects_bad_paths_before_scanning() {
         assert!(stderr(&output).contains(message), "{args:?}: {}", stderr(&output));
         assert!(!out.exists());
     }
+
+    // An output file that cannot be written is rejected before any scan runs,
+    // not after minutes of online lookups.
+    let scope = [
+        "--vulns-path",
+        str(&app),
+        "--npm-path",
+        str(&app),
+        "--secrets-path",
+        str(&app),
+    ];
+    let missing_folder = home.path("missing/r.html");
+    for (target, message) in [(str(&missing_folder), "does not exist"), (str(&app), "is a directory")] {
+        let mut args = vec!["--report", target, "--no-history"];
+        args.extend(scope);
+        let output = home.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{target}");
+        assert!(stderr(&output).contains(message), "{target}: {}", stderr(&output));
+        assert!(
+            !stderr(&output).contains('›'),
+            "nothing was scanned: {}",
+            stderr(&output)
+        );
+    }
+    let output = home.run(&["--only", "sip", "-o", str(&missing_folder)]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+
+    // A bare file name goes to the current folder.
+    let mut args = vec!["--report", "relative.html", "--only", "sip", "--no-history"];
+    args.extend(scope);
+    home.command(&args).current_dir(&home.0).output().unwrap();
+    assert!(home.path("relative.html").is_file());
+}
+
+#[test]
+fn a_closed_stderr_does_not_lose_the_report() {
+    // `swordcheck --report r.html 2>&1 | head` once head has exited: every
+    // write to stderr fails, which must not stop the report or change the exit code.
+    let home = Home::new("stderr");
+    let app = home.project("app", false);
+    let app = str(&app);
+    let report = home.path("report.html");
+    let json = home.path("audit.json");
+    let runs: [Vec<&str>; 2] = [
+        vec![
+            "--report",
+            str(&report),
+            "--no-history",
+            "--vulns-path",
+            app,
+            "--npm-path",
+            app,
+            "--secrets-path",
+            app,
+        ],
+        vec!["--only", "sip", "--no-history", "--format", "json", "-o", str(&json)],
+    ];
+    for args in runs {
+        let normal = home.run(&args).status.code();
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let closed = home
+            .command(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(writer)
+            .status()
+            .unwrap()
+            .code();
+        assert_eq!(closed, normal, "{args:?}");
+    }
+    assert!(std::fs::read_to_string(&report).unwrap().contains("Security check-up"));
+    assert!(std::fs::read_to_string(&json).unwrap().starts_with('{'));
 }
 
 #[test]
