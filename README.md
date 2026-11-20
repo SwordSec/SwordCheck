@@ -349,7 +349,15 @@ be tested against canned output with `MockRunner`.
 
 Copyright © 2026 SwordSec.
 
-Source-available under the [PolyForm Strict License 1.0.0](LICENSE.md): you
-may read the code and run the tool for noncommercial purposes. Commercial use,
-redistribution and modified versions are not permitted. This is not an open
-source license. For anything else, including a commercial license, contact SwordSec.
+SwordCheck is free software: you can redistribute it and/or modify it under
+the terms of the [GNU Affero General Public License, version 3](LICENSE), as
+published by the Free Software Foundation. It is distributed in the hope
+that it will be useful, but without any warranty; see the license for
+details.
+
+In short: you may use it, at home or at work, and you may change it. If you
+distribute a changed version, or offer one to others over a network, you
+must make its source available under the same license.
+
+If the AGPL does not fit your use, contact SwordSec about a commercial
+license.

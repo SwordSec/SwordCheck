@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SwordCheck: a read-only security check-up (settings audit, vulnerabilities, npm malware, secrets)"
 authors = ["SwordSec"]
-license-file = "LICENSE.md"
-# Source-available, not open source: keep it off crates.io.
+license = "AGPL-3.0-only"
+# Not published to crates.io (yet).
 publish = false
 
 [dependencies]
