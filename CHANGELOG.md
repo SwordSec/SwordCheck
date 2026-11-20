@@ -27,3 +27,5 @@ First public version.
 - Strictly read-only: recommendations and, where one command is a complete
   remedy, the command to run yourself.
 - Optional `NVD_API_KEY` from the environment or a `.env` file.
+- **Install script:** `install.sh` installs a release binary without a Rust
+  toolchain, after checking the archive's SHA-256.
