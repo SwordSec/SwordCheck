@@ -54,11 +54,31 @@ pub fn parse_file(path: &Path) -> Option<Lockfile> {
     if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = decode(std::fs::read(path).ok()?)?;
     Some(Lockfile {
         path: path.to_path_buf(),
         packages: parser(&text).into_iter().collect(),
     })
+}
+
+/// Decodes a lockfile. Windows editors and PowerShell's `pip freeze >` save
+/// hand-written files such as `requirements.txt` with a byte order mark, as
+/// UTF-8 or UTF-16; pip reads those, so the scan must too. Without a mark the
+/// file must be UTF-8.
+fn decode(bytes: Vec<u8>) -> Option<String> {
+    fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Option<String> {
+        let (pairs, []) = bytes.as_chunks::<2>() else {
+            return None;
+        };
+        let units: Vec<u16> = pairs.iter().map(|&pair| unit(pair)).collect();
+        String::from_utf16(&units).ok()
+    }
+    match bytes.as_slice() {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => String::from_utf8(bytes).ok(),
+    }
 }
 
 /// Picks the parser for a file name. Function pointers (`fn(&str) -> …`) let
@@ -1401,5 +1421,31 @@ mod tests {
         for name in ["Cargo.toml", "package.json", "notes.txt", "requirements.in"] {
             assert!(!is_lockfile(name), "{name}");
         }
+    }
+
+    #[test]
+    fn byte_order_marks_lose_no_packages() {
+        let text = "requests==2.19.0\r\nDjango==3.2.0\r\n";
+        let expected = ["PyPI:django@3.2.0", "PyPI:requests@2.19.0"];
+        let utf16 = |unit: fn(u16) -> [u8; 2], bom: [u8; 2]| {
+            let mut bytes = bom.to_vec();
+            bytes.extend(text.encode_utf16().flat_map(unit));
+            bytes
+        };
+        for bytes in [
+            text.as_bytes().to_vec(),
+            [b"\xEF\xBB\xBF".as_slice(), text.as_bytes()].concat(),
+            utf16(u16::to_le_bytes, [0xFF, 0xFE]),
+            utf16(u16::to_be_bytes, [0xFE, 0xFF]),
+        ] {
+            let decoded = decode(bytes).expect("decodes");
+            assert_eq!(names(&requirements_txt(&decoded)), expected);
+        }
+        let lock = "\u{feff}{\"packages\": {\"node_modules/lodash\": {\"version\": \"4.17.15\"}}}";
+        let decoded = decode(lock.as_bytes().to_vec()).expect("decodes");
+        assert_eq!(names(&package_lock(&decoded)), ["npm:lodash@4.17.15"]);
+        // Odd-length UTF-16 and invalid UTF-8 still yield nothing.
+        assert_eq!(decode(vec![0xFF, 0xFE, b'a']), None);
+        assert_eq!(decode(vec![b'a', 0xFF]), None);
     }
 }

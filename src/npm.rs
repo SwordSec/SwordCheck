@@ -425,7 +425,10 @@ fn read_manifest(path: &Path) -> Option<Value> {
     if size > MAX_MANIFEST_BYTES {
         return None;
     }
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    let text = std::fs::read_to_string(path).ok()?;
+    // npm and Node strip a leading UTF-8 BOM, so such a package installs and
+    // runs its scripts; it must not slip past the scan.
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok()
 }
 
 /// Returns the description if the package and version match a known incident.
@@ -734,15 +737,19 @@ impl NpmReport {
                 label.yellow().bold()
             };
             let version = if finding.version.is_empty() {
-                "?"
+                "?".to_string()
             } else {
-                &finding.version
+                printable(&finding.version)
             };
             let _ = writeln!(out);
-            let _ = writeln!(out, "{label} {}", format!("{}@{version}", finding.package).bold());
-            let _ = writeln!(out, "    {}", finding.reason);
+            let _ = writeln!(
+                out,
+                "{label} {}",
+                format!("{}@{version}", printable(&finding.package)).bold()
+            );
+            let _ = writeln!(out, "    {}", printable(&finding.reason));
             for path in &finding.paths {
-                let _ = writeln!(out, "    {}", path.display().to_string().dimmed());
+                let _ = writeln!(out, "    {}", printable(&path.display().to_string()).dimmed());
             }
             if finding.count > finding.paths.len() && !finding.paths.is_empty() {
                 let more = finding.count - finding.paths.len();
@@ -779,6 +786,21 @@ impl NpmReport {
         }
         out.trim_end().to_string()
     }
+}
+
+/// Names, versions and paths come from the scanned packages, which may be
+/// malicious: control characters are shown escaped so that they cannot drive
+/// the terminal (e.g. erase the warning line).
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -932,6 +954,44 @@ mod tests {
         let scan = scan(&[temp.0.join("node_modules"), temp.0.join("missing")]);
         assert_eq!(scan.packages, 0);
         assert!(scan.findings.is_empty());
+    }
+
+    #[test]
+    fn manifest_with_a_bom_is_scanned() {
+        // npm and Node accept a package.json that starts with a UTF-8 BOM.
+        let temp = TempDir::new("bom");
+        let dir = temp.0.join("node_modules/event-stream");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!("\u{feff}{}", pkg("event-stream", "3.3.6")),
+        )
+        .unwrap();
+
+        let scan = scan(&[temp.0.join("node_modules")]);
+        assert_eq!(scan.packages, 1);
+        let found: Vec<&str> = scan.malware().map(|finding| finding.package.as_str()).collect();
+        assert_eq!(found, ["event-stream"]);
+    }
+
+    #[test]
+    fn text_report_does_not_pass_control_characters_to_the_terminal() {
+        let scan = Scan {
+            findings: vec![Finding {
+                kind: Kind::Script,
+                package: "evil\u{1b}[1A\u{1b}[2K".into(),
+                version: "1.0.0\u{1b}]0;PWNED\u{7}".into(),
+                reason: "postinstall: directly executes a script it downloads".into(),
+                count: 1,
+                paths: vec![PathBuf::from("/x/node_modules/bundled\u{1b}[2K")],
+            }],
+            ..Scan::default()
+        };
+        let text = NpmReport::new(String::new(), false, scan).to_text();
+
+        assert!(!text.contains("\u{1b}[2K") && !text.contains("\u{1b}]0;") && !text.contains('\u{7}'));
+        assert!(text.contains("evil\\u{1b}[1A\\u{1b}[2K@1.0.0\\u{1b}]0;PWNED\\u{7}"));
+        assert!(text.contains("bundled\\u{1b}[2K"));
     }
 
     #[test]

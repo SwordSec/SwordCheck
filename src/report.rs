@@ -80,6 +80,15 @@ impl Report {
         }
     }
 
+    /// The bare score ("87"), or "n/a" when no check could be evaluated.
+    fn score_value(&self) -> String {
+        if self.scorable {
+            self.score.to_string()
+        } else {
+            "n/a".to_string()
+        }
+    }
+
     /// Fail/Warn checks that have no exception defined.
     fn issues(&self) -> impl Iterator<Item = &CheckResult> {
         self.checks.iter().filter(|check| check.is_issue())
@@ -156,13 +165,17 @@ impl Report {
                 "Since the previous audit".bold(),
                 format!("({})", short_time(&previous.timestamp)).dimmed()
             );
-            let delta = i64::from(self.score) - i64::from(previous.score);
-            let trend = match delta {
-                0 => "unchanged".dimmed(),
-                1.. => format!("+{delta}").green(),
-                _ => delta.to_string().red(),
-            };
-            let _ = writeln!(out, "  Score: {} → {} ({trend})", previous.score, self.score);
+            if self.scorable {
+                let delta = i64::from(self.score) - i64::from(previous.score);
+                let trend = match delta {
+                    0 => "unchanged".dimmed(),
+                    1.. => format!("+{delta}").green(),
+                    _ => delta.to_string().red(),
+                };
+                let _ = writeln!(out, "  Score: {} → {} ({trend})", previous.score, self.score);
+            } else {
+                let _ = writeln!(out, "  Score: {} → {}", previous.score, self.score_value());
+            }
             for change in &self.changes {
                 let arrow = if change.improved() { "▲".green() } else { "▼".red() };
                 let _ = writeln!(
@@ -255,7 +268,7 @@ impl Report {
                 out,
                 "Score: {} → {} (previous: {})",
                 previous.score,
-                self.score,
+                self.score_value(),
                 short_time(&previous.timestamp)
             );
             for change in &self.changes {
@@ -318,10 +331,12 @@ impl Report {
                     .unwrap_or_default()
             );
         }
-        let advice = if advice.is_empty() {
+        let advice = if !advice.is_empty() {
+            format!("<ul>\n{advice}</ul>")
+        } else if self.scorable {
             "<p>All audited safeguards are in place.</p>".to_string()
         } else {
-            format!("<ul>\n{advice}</ul>")
+            "<p>No check could be evaluated, so there is nothing to score.</p>".to_string()
         };
 
         let mut trend = String::new();
@@ -330,7 +345,7 @@ impl Report {
                 trend,
                 "<h2>Since the previous audit</h2>\n<p>Score: {} → {} (previous: {})</p>\n<ul>",
                 previous.score,
-                self.score,
+                self.score_value(),
                 escape_html(&short_time(&previous.timestamp))
             );
             for change in &self.changes {
@@ -345,11 +360,14 @@ impl Report {
             trend.push_str("</ul>\n");
         }
 
-        let score_class = match self.score {
-            90.. => "pass",
-            60..=89 => "warn",
+        let score_class = match (self.scorable, self.score) {
+            (false, _) => "unknown",
+            (true, 90..) => "pass",
+            (true, 60..=89) => "warn",
             _ => "fail",
         };
+        // "/ 100" only follows a real score, not "n/a".
+        let out_of = if self.scorable { "/ 100 · " } else { "" };
 
         format!(
             r#"<!doctype html>
@@ -387,7 +405,7 @@ impl Report {
 <main>
 <h1>macOS Security Audit</h1>
 <div class="muted">{os} · {time} · read-only audit</div>
-<div class="score"><strong class="{score_class}">{score}</strong><span>/ 100 · Grade: {grade}</span>
+<div class="score"><strong class="{score_class}">{score}</strong><span>{out_of}Grade: {grade}</span>
 <span class="muted">{pass} pass · {warn} warn · {fail} fail · {unknown} unknown · {exempt} exempt</span></div>
 <div class="card">
 <table>
@@ -405,7 +423,7 @@ impl Report {
 "#,
             os = escape_html(&self.os_version),
             time = escape_html(&short_time(&self.timestamp)),
-            score = self.score,
+            score = self.score_value(),
             grade = self.grade,
             pass = self.summary.pass,
             warn = self.summary.warn,
@@ -556,6 +574,54 @@ mod tests {
         let html = sample().to_html();
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("badge fail"));
+    }
+
+    #[test]
+    fn html_shows_n_a_when_nothing_is_scorable() {
+        // `--only airdrop --format html` on a machine where the check is Unknown.
+        let report = Report::new(
+            "2026-11-10T14:05:00+03:00".into(),
+            "macOS 26".into(),
+            vec![result("airdrop", Status::Unknown, 5)],
+            None,
+        );
+        let html = report.to_html();
+        assert!(html.contains("<strong class=\"unknown\">n/a</strong><span>Grade: n/a</span>"));
+        assert!(
+            !html.contains(">100</strong>"),
+            "the placeholder score is not a perfect score"
+        );
+        assert!(!html.contains("All audited safeguards are in place."));
+        assert!(html.contains("No check could be evaluated, so there is nothing to score."));
+
+        let html = sample().to_html();
+        assert!(html.contains("<strong class=\"fail\">50</strong><span>/ 100 · Grade: D</span>"));
+    }
+
+    #[test]
+    fn trend_does_not_compare_against_the_placeholder_score() {
+        colored::control::set_override(false);
+        let before = [result("firewall", Status::Fail, 20)];
+        let previous = RunRecord::new("2026-11-01T09:00:00+03:00".into(), "macOS 26".into(), 50, &before);
+        let report = Report::new(
+            "2026-11-10T14:05:00+03:00".into(),
+            "macOS 26".into(),
+            vec![result("firewall", Status::Unknown, 20)],
+            Some(&previous),
+        );
+        let text = report.render(Format::Text, false);
+        assert!(text.contains("  Score: 50 → n/a\n"), "{text}");
+        assert!(!text.contains("+50"));
+        assert!(
+            report
+                .to_markdown()
+                .contains("Score: 50 → n/a (previous: 2026-11-01 09:00)")
+        );
+        assert!(
+            report
+                .to_html()
+                .contains("<p>Score: 50 → n/a (previous: 2026-11-01 09:00)</p>")
+        );
     }
 
     #[test]

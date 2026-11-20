@@ -13,11 +13,14 @@ use std::path::{Path, PathBuf};
 pub struct LaunchItems;
 
 /// It is unusual for a program to run from these locations.
-const TEMP_DIRS: [&str; 5] = [
+/// `/var/folders` holds each user's `$TMPDIR`.
+const TEMP_DIRS: [&str; 7] = [
     "/tmp/",
     "/private/tmp/",
     "/var/tmp/",
     "/private/var/tmp/",
+    "/var/folders/",
+    "/private/var/folders/",
     "/Users/Shared/",
 ];
 
@@ -327,6 +330,9 @@ mod tests {
             Some("runs from a temporary/shared directory")
         );
         assert!(suspicion(&command(&["/Users/Shared/helper", "--daemon"])).is_some());
+        // The per-user temporary directory ($TMPDIR).
+        assert!(suspicion(&command(&["/private/var/folders/x1/abcd/T/updater"])).is_some());
+        assert!(suspicion(&command(&["/bin/sh", "/var/folders/x1/abcd/T/run.sh"])).is_some());
     }
 
     #[test]

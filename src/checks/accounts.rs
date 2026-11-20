@@ -195,6 +195,13 @@ impl Check for SudoNoPassword {
                 "The sudo rules contain NOPASSWD: commands can run without a password.",
                 "Remove the NOPASSWD rules in /etc/sudoers and /etc/sudoers.d with `sudo visudo`.",
             )
+        } else if text.contains("!authenticate") {
+            // `Defaults !authenticate` turns off the password without any
+            // NOPASSWD tag; `sudo -l` lists it among the matching Defaults.
+            Outcome::fail(
+                "The sudo defaults contain !authenticate: commands can run without a password.",
+                "Remove the !authenticate defaults in /etc/sudoers and /etc/sudoers.d with `sudo visudo`.",
+            )
         } else if text.contains("password is required") {
             Outcome::pass("sudo requires a password.")
         } else if out.success {
@@ -298,6 +305,26 @@ mod tests {
         assert_eq!(SudoNoPassword.run(&nopasswd).status, Status::Fail);
 
         let cached = MockRunner::new().ok(cmd, "(ALL) ALL");
+        assert_eq!(SudoNoPassword.run(&cached).status, Status::Pass);
+    }
+
+    #[test]
+    fn sudo_without_authentication_fails() {
+        // `Defaults !authenticate` needs no NOPASSWD tag, and `sudo -n -l`
+        // succeeds without a cached ticket: that is not "session is cached".
+        let cmd = "sudo -n -l";
+        let listing = |defaults: &str| {
+            format!(
+                "Matching Defaults entries for alice on mac:\n    {defaults}\n\n\
+                 User alice may run the following commands on mac:\n    (ALL) ALL"
+            )
+        };
+        for defaults in ["env_reset, !authenticate", "!authenticate, env_reset"] {
+            let outcome = SudoNoPassword.run(&MockRunner::new().ok(cmd, &listing(defaults)));
+            assert_eq!(outcome.status, Status::Fail, "{defaults}");
+            assert!(outcome.detail.contains("!authenticate"), "{}", outcome.detail);
+        }
+        let cached = MockRunner::new().ok(cmd, &listing("env_reset"));
         assert_eq!(SudoNoPassword.run(&cached).status, Status::Pass);
     }
 }

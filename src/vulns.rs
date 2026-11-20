@@ -717,37 +717,49 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
     }
 }
 
-/// Several databases (GitHub, PyPA, RustSec…) often describe the same CVE.
-/// Keeps one finding per package version and CVE: the one with a severity
-/// rating, with the fixed versions of all of them combined.
+/// Several databases (GitHub, PyPA, RustSec…) often describe the same CVE,
+/// not always with the same list of aliases. Keeps one finding per package
+/// version and CVE: findings that share a CVE are combined into the one with
+/// a severity rating, keeping the CVEs, fixed versions, KEV status and EPSS
+/// of all of them.
 fn merge_duplicates(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut merged: BTreeMap<(&'static str, String, String, String), Finding> = BTreeMap::new();
+    let mut by_package: BTreeMap<(&'static str, String, String), Vec<Finding>> = BTreeMap::new();
     for finding in findings {
-        // Advisories without a CVE are only merged with themselves.
-        let vulnerability = finding.cves.first().unwrap_or(&finding.id).clone();
-        let key = (
-            finding.ecosystem,
-            finding.package.clone(),
-            finding.version.clone(),
-            vulnerability,
-        );
-        match merged.get_mut(&key) {
-            None => {
-                merged.insert(key, finding);
-            }
-            Some(kept) => {
-                let mut fixed: BTreeSet<String> = kept.fixed.drain(..).collect();
-                fixed.extend(finding.fixed.iter().cloned());
-                // `Severity` orders worst-first with `Unknown` last, so the
-                // smaller value is the more informative one.
-                if finding.severity < kept.severity {
-                    *kept = finding;
-                }
-                kept.fixed = fixed.into_iter().collect();
-            }
+        let key = (finding.ecosystem, finding.package.clone(), finding.version.clone());
+        let group = by_package.entry(key).or_default();
+        let mut combined = finding;
+        // One finding can link two that looked unrelated so far.
+        while let Some(index) = group.iter().position(|kept| same_vulnerability(kept, &combined)) {
+            combined = combine(group.swap_remove(index), combined);
         }
+        group.push(combined);
     }
-    merged.into_values().collect()
+    by_package.into_values().flatten().collect()
+}
+
+/// Do two findings for the same package version describe the same
+/// vulnerability? Advisories without a CVE are only merged with themselves.
+fn same_vulnerability(a: &Finding, b: &Finding) -> bool {
+    a.id == b.id || a.cves.iter().any(|cve| b.cves.contains(cve))
+}
+
+/// Merges two findings for the same vulnerability without losing any of the
+/// signals the ranking depends on.
+fn combine(a: Finding, b: Finding) -> Finding {
+    // `Severity` orders worst-first with `Unknown` last, so the smaller value
+    // is the more informative one.
+    let (mut kept, other) = if b.severity < a.severity { (b, a) } else { (a, b) };
+    let cves: BTreeSet<String> = kept.cves.drain(..).chain(other.cves).collect();
+    kept.cves = cves.into_iter().collect();
+    let fixed: BTreeSet<String> = kept.fixed.drain(..).chain(other.fixed).collect();
+    kept.fixed = fixed.into_iter().collect();
+    kept.kev = match (kept.kev.take(), other.kev) {
+        (Some(kev), Some(more)) if more.ransomware && !kev.ransomware => Some(more),
+        (kev, more) => kev.or(more),
+    };
+    kept.epss = kept.epss.into_iter().chain(other.epss).reduce(f64::max);
+    kept.malware |= other.malware;
+    kept
 }
 
 /// Sort order: exploited first, then by exploit probability, then severity.
@@ -2005,6 +2017,25 @@ mod tests {
         assert_eq!(kept.severity, Severity::High);
         assert_eq!(kept.id, "GHSA-pkg");
         assert_eq!(kept.fixed, ["1.0.1", "2.0.0"]);
+    }
+
+    #[test]
+    fn merging_keeps_the_exploit_signals_of_every_copy() {
+        // The rated advisory names one CVE; the unrated one also names a
+        // second CVE that is known to be exploited.
+        let mut rated = finding("pkg", Severity::High, None, false);
+        rated.cves = vec!["CVE-2024-2".to_string()];
+        let mut unrated = finding("pkg", Severity::Unknown, Some(0.9), true);
+        unrated.id = "GO-1".to_string();
+        unrated.cves = vec!["CVE-2024-1".to_string(), "CVE-2024-2".to_string()];
+
+        let merged = merge_duplicates(vec![unrated, rated]);
+        assert_eq!(merged.len(), 1, "a CVE shared by both is one vulnerability");
+        let kept = &merged[0];
+        assert_eq!((kept.id.as_str(), kept.severity), ("GHSA-pkg", Severity::High));
+        assert_eq!(kept.cves, ["CVE-2024-1", "CVE-2024-2"]);
+        assert!(kept.kev.is_some(), "the KEV status must survive the merge");
+        assert_eq!(kept.epss, Some(0.9));
     }
 
     #[test]

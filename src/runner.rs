@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long a single command may run before it is killed. A hung helper
@@ -63,15 +63,19 @@ pub trait CommandRunner: Sync {
 /// Runs real system commands and caches the results.
 ///
 /// Several checks use the same command (e.g. `netstat`); thanks to the cache
-/// the command runs only once. The `Mutex` lets parallel checks access the
-/// map safely.
+/// the command runs only once, even when parallel checks ask for it at the
+/// same moment: the first caller runs it and the others wait for its result.
+/// The `Mutex` lets parallel checks access the map safely.
 ///
 /// Every command is subject to a time limit (`COMMAND_TIMEOUT` by default);
 /// a command that exceeds it is killed and reported as an `Err`.
 pub struct SystemRunner {
-    cache: Mutex<HashMap<String, Result<CmdOutput, String>>>,
+    cache: Mutex<HashMap<String, Arc<CacheEntry>>>,
     timeout: Duration,
 }
+
+/// The result of one command, filled in by whichever caller runs it first.
+type CacheEntry = OnceLock<Result<CmdOutput, String>>;
 
 impl Default for SystemRunner {
     fn default() -> Self {
@@ -98,15 +102,13 @@ impl CommandRunner for SystemRunner {
         let key = command_key(program, args);
 
         // We hold the lock only while looking at the map and release it
-        // while the command runs, so other checks do not have to wait.
-        if let Some(cached) = self.cache.lock().unwrap().get(&key) {
-            return cached.clone();
-        }
-
-        let result = run_with_timeout(program, args, self.timeout);
-
-        self.cache.lock().unwrap().insert(key, result.clone());
-        result
+        // while the command runs, so checks running other commands do not
+        // have to wait. A check asking for the same command waits on its
+        // entry until the first run has finished, instead of starting it again.
+        let entry = Arc::clone(self.cache.lock().unwrap().entry(key).or_default());
+        entry
+            .get_or_init(|| run_with_timeout(program, args, self.timeout))
+            .clone()
     }
 }
 
@@ -340,6 +342,48 @@ mod tests {
         assert!(out.success);
         assert_eq!(out.stdout.len(), 300_000);
         assert_eq!(out.stderr.len(), 300_000);
+    }
+
+    #[test]
+    fn concurrent_calls_run_a_command_once() {
+        // Parallel checks (e.g. two that both read `netstat`) ask for the same
+        // command at once. Each run of the script appends a line to $0, then
+        // waits until the file $1 exists.
+        let dir = std::env::temp_dir().join(format!("swordcheck-runner-once-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (count, gate) = (dir.join("count"), dir.join("gate"));
+        let script = r#"echo run >> "$0"; while [ ! -e "$1" ]; do sleep 0.01; done; echo out"#;
+        let args = ["-c", script, count.to_str().unwrap(), gate.to_str().unwrap()];
+        let runs = || std::fs::read_to_string(&count).map_or(0, |text| text.lines().count());
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::yield_now();
+            }
+        };
+
+        let runner = SystemRunner::with_timeout(Duration::from_secs(15));
+        let holders = || {
+            let cache = runner.cache.lock().unwrap();
+            cache.get(&command_key("/bin/sh", &args)).map(Arc::strong_count)
+        };
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| runner.run("/bin/sh", &args));
+            wait("the first run", &|| runs() == 1);
+            let second = scope.spawn(|| runner.run("/bin/sh", &args));
+            // The map and both callers hold the entry: the second caller is
+            // waiting for the first run, which has not finished yet.
+            wait("the second caller", &|| holders() == Some(3));
+            std::fs::write(&gate, "").unwrap();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let executions = runs();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(executions, 1, "the command ran more than once");
+        assert_eq!(first, second);
+        assert_eq!(first.unwrap().stdout, "out");
     }
 
     #[test]
