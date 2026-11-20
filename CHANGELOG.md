@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-20
+
 First public version.
 
 ### Features
@@ -31,3 +33,6 @@ First public version.
   self-contained HTML page, with a "Fix these first" list across modules.
 - **Install script:** `install.sh` installs a release binary without a Rust
   toolchain, after checking the archive's SHA-256.
+
+[Unreleased]: https://github.com/SwordSec/SwordCheck/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/SwordSec/SwordCheck/releases/tag/v0.1.0
