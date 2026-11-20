@@ -88,11 +88,18 @@ fn request(chunk: &[Query], pending: &[(usize, Option<String>)]) -> String {
     json!({ "queries": queries }).to_string()
 }
 
+/// The advisories of one query and, if the list was cut off, the token that
+/// asks for the rest.
+type Page = (Vec<Vuln>, Option<String>);
+
 /// Results come back in query order, one entry per query; each may carry a
 /// `next_page_token`.
-fn parse_batch(response: &str, expected: usize) -> Result<Vec<(Vec<Vuln>, Option<String>)>, String> {
+fn parse_batch(response: &str, expected: usize) -> Result<Vec<Page>, String> {
     let value: Value = serde_json::from_str(response).map_err(|err| format!("invalid OSV response: {err}"))?;
-    let results = value.get("results").and_then(Value::as_array).ok_or("OSV response has no `results`")?;
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or("OSV response has no `results`")?;
     if results.len() != expected {
         return Err(format!("OSV returned {} results for {expected} queries", results.len()));
     }
@@ -107,7 +114,11 @@ fn parse_batch(response: &str, expected: usize) -> Result<Vec<(Vec<Vuln>, Option
                 .filter_map(|vuln| {
                     Some(Vuln {
                         id: vuln.get("id")?.as_str()?.to_string(),
-                        modified: vuln.get("modified").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        modified: vuln
+                            .get("modified")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                     })
                 })
                 .collect();
@@ -126,7 +137,11 @@ mod tests {
     use super::*;
 
     fn queries() -> [Query<'static>; 3] {
-        ["a", "b", "c"].map(|name| Query { ecosystem: "npm", name, version: "1.0.0" })
+        ["a", "b", "c"].map(|name| Query {
+            ecosystem: "npm",
+            name,
+            version: "1.0.0",
+        })
     }
 
     #[test]
@@ -137,7 +152,10 @@ mod tests {
             {"vulns": [{"id": "MAL-1", "modified": "m"}]}
         ]}"#;
         let results = query_with(&queries(), |_, _| {}, |_| Ok(response.to_string())).unwrap();
-        let ids: Vec<Vec<&str>> = results.iter().map(|vulns| vulns.iter().map(|v| v.id.as_str()).collect()).collect();
+        let ids: Vec<Vec<&str>> = results
+            .iter()
+            .map(|vulns| vulns.iter().map(|v| v.id.as_str()).collect())
+            .collect();
         assert_eq!(ids, [vec!["GHSA-1", "GHSA-2"], vec![], vec!["MAL-1"]]);
         assert_eq!(results[0][0].modified, "2024-01-01T00:00:00Z");
         assert_eq!(results[0][1].modified, "");
@@ -160,10 +178,17 @@ mod tests {
             },
         )
         .unwrap();
-        let ids: Vec<Vec<&str>> = results.iter().map(|vulns| vulns.iter().map(|v| v.id.as_str()).collect()).collect();
+        let ids: Vec<Vec<&str>> = results
+            .iter()
+            .map(|vulns| vulns.iter().map(|v| v.id.as_str()).collect())
+            .collect();
         assert_eq!(ids, [vec!["A-1"], vec!["B-1", "B-2", "B-3"], vec![]]);
         assert_eq!(bodies.len(), 3);
-        assert!(bodies[1].contains(r#""name":"b""#) && bodies[1].contains(r#""page_token":"t1""#), "{}", bodies[1]);
+        assert!(
+            bodies[1].contains(r#""name":"b""#) && bodies[1].contains(r#""page_token":"t1""#),
+            "{}",
+            bodies[1]
+        );
         assert!(!bodies[1].contains(r#""name":"a""#));
         assert!(bodies[2].contains(r#""page_token":"t2""#));
     }
@@ -173,7 +198,10 @@ mod tests {
         let run = |response: &str| query_with(&queries(), |_, _| {}, |_| Ok(response.to_string()));
         assert!(run(r#"{"results": [{}]}"#).is_err(), "one result for three queries");
         assert!(run("<html>").is_err());
-        assert!(run(r#"{"results": [{"next_page_token": "x"}, {}, {}]}"#).is_err(), "endless pages");
+        assert!(
+            run(r#"{"results": [{"next_page_token": "x"}, {}, {}]}"#).is_err(),
+            "endless pages"
+        );
         assert!(query_with(&queries(), |_, _| {}, |_| Err("offline".to_string())).is_err());
     }
 }

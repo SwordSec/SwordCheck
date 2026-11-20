@@ -44,13 +44,22 @@ impl Progress {
 
     /// Prints phases and notes to stderr, one per line.
     pub fn stderr() -> Self {
-        Self { sink: Sink::Stderr, ..Self::default() }
+        Self {
+            sink: Sink::Stderr,
+            ..Self::default()
+        }
     }
 
     /// Returns a handle and the receiving end of its channel.
     pub fn channel() -> (Self, Receiver<Event>) {
         let (sender, receiver) = mpsc::channel();
-        (Self { sink: Sink::Channel(sender), ..Self::default() }, receiver)
+        (
+            Self {
+                sink: Sink::Channel(sender),
+                ..Self::default()
+            },
+            receiver,
+        )
     }
 
     pub fn stage(&self, label: impl Into<String>) {
@@ -103,7 +112,11 @@ mod tests {
         let received: Vec<Event> = events.try_iter().collect();
         assert_eq!(
             received,
-            [Event::Stage("Reading".into()), Event::Step { done: 1, total: 2 }, Event::Note("file".into())]
+            [
+                Event::Stage("Reading".into()),
+                Event::Step { done: 1, total: 2 },
+                Event::Note("file".into())
+            ]
         );
     }
 

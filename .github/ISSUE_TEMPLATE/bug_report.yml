@@ -1,0 +1,50 @@
+name: Bug report
+description: Something gives a wrong result, crashes or behaves unexpectedly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. **Remove anything secret before posting**: SwordCheck masks
+        secrets in its own output, but paths, package names and host names can still be private.
+  - type: input
+    id: version
+    attributes:
+      label: SwordCheck version
+      description: Output of `swordcheck --version`.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: "macOS 26.1, Apple silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module
+      options:
+        - Security audit
+        - Vulnerability scan (--vulns)
+        - npm malware scan (--npm)
+        - Secret scan (--secrets)
+        - Dashboard
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The exact command and, if you can share it, the relevant output.
+      render: text
+    validations:
+      required: true

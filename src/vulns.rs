@@ -19,12 +19,12 @@
 //! `~/.swordcheck/cache`.
 
 use crate::lockfiles::{self, Lockfile, Package};
+use crate::net::{self, run_curl};
+use crate::osv;
 use crate::progress::Progress;
 use crate::runner::CommandRunner;
 use colored::Colorize;
 use serde::Serialize;
-use crate::net::{self, run_curl};
-use crate::osv;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -215,8 +215,12 @@ impl Scan {
 
     /// Says how many Homebrew formulae were left out, if any.
     pub fn unmatched_note(&self) -> Option<String> {
-        (self.unmatched_formulae > 0)
-            .then(|| format!("{} other Homebrew formulae are not in the lookup table and were not checked", self.unmatched_formulae))
+        (self.unmatched_formulae > 0).then(|| {
+            format!(
+                "{} other Homebrew formulae are not in the lookup table and were not checked",
+                self.unmatched_formulae
+            )
+        })
     }
 
     fn count(&self, severity: Severity) -> usize {
@@ -382,7 +386,10 @@ const FORMULAE: &[(&str, &str)] = &[
 /// Builds the list of products to look up: macOS, recognized apps and
 /// recognized Homebrew formulae.
 pub fn system_items(runner: &dyn CommandRunner) -> System {
-    let mut system = System { items: app_items(runner), unmatched_formulae: 0 };
+    let mut system = System {
+        items: app_items(runner),
+        unmatched_formulae: 0,
+    };
     for cellar in homebrew_cellars() {
         let (items, unmatched) = homebrew_items(&cellar);
         system.items.extend(items);
@@ -395,11 +402,20 @@ pub fn system_items(runner: &dyn CommandRunner) -> System {
 fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
     let mut items = Vec::new();
     let read = |program: &str, args: &[&str]| {
-        runner.run(program, args).ok().filter(|out| out.success).map(|out| out.stdout.trim().to_string())
+        runner
+            .run(program, args)
+            .ok()
+            .filter(|out| out.success)
+            .map(|out| out.stdout.trim().to_string())
     };
 
     if let Some(version) = read("sw_vers", &["-productVersion"]).as_deref().and_then(clean_version) {
-        items.push(system_item(Source::Os, "macOS", &version, format!("cpe:2.3:o:apple:macos:{version}:*:*:*:*:*:*:*")));
+        items.push(system_item(
+            Source::Os,
+            "macOS",
+            &version,
+            format!("cpe:2.3:o:apple:macos:{version}:*:*:*:*:*:*:*"),
+        ));
     }
 
     let mut dirs = vec![PathBuf::from("/Applications")];
@@ -422,16 +438,26 @@ fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
             let plist = plist.to_string_lossy();
             // `plutil` reads both XML and binary property lists.
             let extract = |key: &str| read("plutil", &["-extract", key, "raw", "-o", "-", &plist]);
-            let Some(product) = extract("CFBundleIdentifier")
-                .and_then(|id| APPS.iter().find(|(bundle, _)| *bundle == id).map(|(_, product)| *product))
-            else {
+            let Some(product) = extract("CFBundleIdentifier").and_then(|id| {
+                APPS.iter()
+                    .find(|(bundle, _)| *bundle == id)
+                    .map(|(_, product)| *product)
+            }) else {
                 continue;
             };
             let Some(version) = extract("CFBundleShortVersionString").as_deref().and_then(clean_version) else {
                 continue;
             };
-            let name = app.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            items.push(system_item(Source::App, &name, &version, format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*")));
+            let name = app
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            items.push(system_item(
+                Source::App,
+                &name,
+                &version,
+                format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*"),
+            ));
         }
     }
     items
@@ -440,13 +466,20 @@ fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
 /// The Cellar of every Homebrew installation: a custom prefix, Apple
 /// silicon and Intel.
 fn homebrew_cellars() -> Vec<PathBuf> {
-    let mut prefixes: Vec<PathBuf> = std::env::var_os("HOMEBREW_PREFIX").map(PathBuf::from).into_iter().collect();
+    let mut prefixes: Vec<PathBuf> = std::env::var_os("HOMEBREW_PREFIX")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
     for default in ["/opt/homebrew", "/usr/local"] {
         if !prefixes.iter().any(|prefix| prefix == Path::new(default)) {
             prefixes.push(PathBuf::from(default));
         }
     }
-    prefixes.into_iter().map(|prefix| prefix.join("Cellar")).filter(|cellar| cellar.is_dir()).collect()
+    prefixes
+        .into_iter()
+        .map(|prefix| prefix.join("Cellar"))
+        .filter(|cellar| cellar.is_dir())
+        .collect()
 }
 
 /// Reads a Cellar (`Cellar/<formula>/<version>/`) without running `brew`.
@@ -469,7 +502,10 @@ fn homebrew_items(cellar: &Path) -> (Vec<SystemItem>, usize) {
     let mut unmatched = 0;
     for formula in subdirs(cellar) {
         let versions = subdirs(&cellar.join(&formula));
-        let found: Vec<SystemItem> = versions.iter().filter_map(|version| formula_item(&formula, version)).collect();
+        let found: Vec<SystemItem> = versions
+            .iter()
+            .filter_map(|version| formula_item(&formula, version))
+            .collect();
         if found.is_empty() && !versions.is_empty() {
             unmatched += 1;
         }
@@ -481,9 +517,17 @@ fn homebrew_items(cellar: &Path) -> (Vec<SystemItem>, usize) {
 /// The lookup for one installed formula version, if the formula is known.
 fn formula_item(formula: &str, version: &str) -> Option<SystemItem> {
     let base = formula.split('@').next()?;
-    let product = FORMULAE.iter().find(|(name, _)| *name == base).map(|(_, product)| *product)?;
+    let product = FORMULAE
+        .iter()
+        .find(|(name, _)| *name == base)
+        .map(|(_, product)| *product)?;
     let version = clean_version(strip_revision(version))?;
-    Some(system_item(Source::Homebrew, formula, &version, format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*")))
+    Some(system_item(
+        Source::Homebrew,
+        formula,
+        &version,
+        format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*"),
+    ))
 }
 
 /// Drops Homebrew's own rebuild counter: `8.11.1_2` is upstream `8.11.1`.
@@ -511,7 +555,9 @@ fn system_item(source: Source, name: &str, version: &str, cpe: String) -> System
 fn clean_version(raw: &str) -> Option<String> {
     let version = raw.split_whitespace().next()?;
     let valid = version.starts_with(|c: char| c.is_ascii_digit())
-        && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
     valid.then(|| version.to_string())
 }
 
@@ -561,7 +607,10 @@ pub struct Online {
 /// Looks everything up. A failing service adds a warning instead of
 /// aborting, so partial results are still shown.
 pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
-    let System { items: mut system, unmatched_formulae } = system;
+    let System {
+        items: mut system,
+        unmatched_formulae,
+    } = system;
     let mut warnings = Vec::new();
     let unique = unique_packages(lockfiles);
     let packages: Vec<&Package> = unique.keys().copied().collect();
@@ -580,7 +629,10 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
     }
 
     // 2. Advisory details (summary, severity, fixed versions).
-    let wanted: BTreeMap<&str, &str> = hits.iter().map(|hit| (hit.id.as_str(), hit.modified.as_str())).collect();
+    let wanted: BTreeMap<&str, &str> = hits
+        .iter()
+        .map(|hit| (hit.id.as_str(), hit.modified.as_str()))
+        .collect();
     let (advisories, download_error) = osv_details(&wanted, &options.cache.join("osv"), progress);
     let without_details = wanted.keys().filter(|id| !advisories.contains_key(**id)).count();
     if without_details > 0 {
@@ -597,10 +649,15 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
         BTreeMap::new()
     });
     progress.note(format!("{} known-exploited vulnerabilities in the catalog", kev.len()));
-    let cves: BTreeSet<&str> = advisories.values().flat_map(|a| a.cves.iter().map(String::as_str)).collect();
+    let cves: BTreeSet<&str> = advisories
+        .values()
+        .flat_map(|a| a.cves.iter().map(String::as_str))
+        .collect();
     let (epss, epss_error) = epss_lookup(&cves, progress);
     if let Some(err) = epss_error {
-        warnings.push(format!("EPSS lookup failed for some CVEs ({err}); those are ranked by severity only."));
+        warnings.push(format!(
+            "EPSS lookup failed for some CVEs ({err}); those are ranked by severity only."
+        ));
     }
 
     let unavailable = Advisory {
@@ -626,9 +683,17 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
             severity: advisory.severity,
             malware: hit.id.starts_with("MAL-"),
             fixed: advisory.fixed_for(package),
-            kev: advisory.cves.iter().find_map(|cve| kev.get(cve.as_str())).map(|entry| entry.kev.clone()),
+            kev: advisory
+                .cves
+                .iter()
+                .find_map(|cve| kev.get(cve.as_str()))
+                .map(|entry| entry.kev.clone()),
             // An advisory may alias several CVEs; the riskiest one counts.
-            epss: advisory.cves.iter().filter_map(|cve| epss.get(cve.as_str()).copied()).reduce(f64::max),
+            epss: advisory
+                .cves
+                .iter()
+                .filter_map(|cve| epss.get(cve.as_str()).copied())
+                .reduce(f64::max),
             lockfile_count: paths.len(),
             lockfiles: paths.iter().take(MAX_PATHS).map(|path| path.to_path_buf()).collect(),
         });
@@ -660,7 +725,12 @@ fn merge_duplicates(findings: Vec<Finding>) -> Vec<Finding> {
     for finding in findings {
         // Advisories without a CVE are only merged with themselves.
         let vulnerability = finding.cves.first().unwrap_or(&finding.id).clone();
-        let key = (finding.ecosystem, finding.package.clone(), finding.version.clone(), vulnerability);
+        let key = (
+            finding.ecosystem,
+            finding.package.clone(),
+            finding.version.clone(),
+            vulnerability,
+        );
         match merged.get_mut(&key) {
             None => {
                 merged.insert(key, finding);
@@ -718,7 +788,12 @@ fn summarize_projects(
                 if !lockfile.packages.contains(package) {
                     continue;
                 }
-                let key = (package.ecosystem, package.name.as_str(), package.version.as_str(), hit.id.as_str());
+                let key = (
+                    package.ecosystem,
+                    package.name.as_str(),
+                    package.version.as_str(),
+                    hit.id.as_str(),
+                );
                 let Some(finding) = by_key.get(&key) else {
                     continue;
                 };
@@ -758,7 +833,11 @@ fn osv_query(packages: &[&Package], progress: &Progress) -> Result<Vec<OsvHit>, 
     progress.stage(format!("Asking OSV.dev about {} packages", packages.len()));
     let queries: Vec<osv::Query> = packages
         .iter()
-        .map(|p| osv::Query { ecosystem: p.ecosystem, name: &p.name, version: &p.version })
+        .map(|p| osv::Query {
+            ecosystem: p.ecosystem,
+            name: &p.name,
+            version: &p.version,
+        })
         .collect();
     let results = osv::query(&queries, |done, total| progress.step(done, total))?;
     Ok(flatten_hits(results))
@@ -768,7 +847,13 @@ fn flatten_hits(results: Vec<Vec<osv::Vuln>>) -> Vec<OsvHit> {
     results
         .into_iter()
         .enumerate()
-        .flat_map(|(package, vulns)| vulns.into_iter().map(move |vuln| OsvHit { package, id: vuln.id, modified: vuln.modified }))
+        .flat_map(|(package, vulns)| {
+            vulns.into_iter().map(move |vuln| OsvHit {
+                package,
+                id: vuln.id,
+                modified: vuln.modified,
+            })
+        })
         .collect()
 }
 
@@ -787,7 +872,9 @@ impl Advisory {
         let fixed: BTreeSet<&str> = self
             .fixed
             .iter()
-            .filter(|(ecosystem, name, _)| ecosystem == package.ecosystem && same_package(ecosystem, name, &package.name))
+            .filter(|(ecosystem, name, _)| {
+                ecosystem == package.ecosystem && same_package(ecosystem, name, &package.name)
+            })
             .map(|(_, _, version)| version.as_str())
             .collect();
         fixed.into_iter().map(str::to_string).collect()
@@ -818,12 +905,25 @@ fn parse_advisory(text: &str) -> Option<Advisory> {
     let value: Value = serde_json::from_str(text).ok()?;
     let id = value.get("id")?.as_str()?;
     let strings = |key: &str| -> Vec<&str> {
-        value.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect()
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
     };
 
-    let mut cves: BTreeSet<&str> = strings("aliases").into_iter().filter(|alias| alias.starts_with("CVE-")).collect();
+    let mut cves: BTreeSet<&str> = strings("aliases")
+        .into_iter()
+        .filter(|alias| alias.starts_with("CVE-"))
+        .collect();
     // Some databases reference the CVE under `upstream` or use it as the id.
-    cves.extend(strings("upstream").into_iter().filter(|alias| alias.starts_with("CVE-")));
+    cves.extend(
+        strings("upstream")
+            .into_iter()
+            .filter(|alias| alias.starts_with("CVE-")),
+    );
     if id.starts_with("CVE-") {
         cves.insert(id);
     }
@@ -898,7 +998,11 @@ fn cvss3_score(vector: &str) -> Option<f64> {
     if !vector.starts_with("CVSS:3.") {
         return None;
     }
-    let metrics: BTreeMap<&str, &str> = vector.split('/').skip(1).filter_map(|part| part.split_once(':')).collect();
+    let metrics: BTreeMap<&str, &str> = vector
+        .split('/')
+        .skip(1)
+        .filter_map(|part| part.split_once(':'))
+        .collect();
     let metric = |name: &str| metrics.get(name).copied();
 
     let scope_changed = metric("S")? == "C";
@@ -943,7 +1047,11 @@ fn cvss3_score(vector: &str) -> Option<f64> {
         return Some(0.0);
     }
     let exploitability = 8.22 * attack_vector * complexity * privileges * interaction;
-    let raw = if scope_changed { 1.08 * (impact + exploitability) } else { impact + exploitability };
+    let raw = if scope_changed {
+        1.08 * (impact + exploitability)
+    } else {
+        impact + exploitability
+    };
     // The specification rounds up to one decimal.
     Some((raw.min(10.0) * 10.0 - 1e-9).ceil() / 10.0)
 }
@@ -958,9 +1066,18 @@ fn osv_details(
     progress: &Progress,
 ) -> (BTreeMap<String, Advisory>, Option<String>) {
     let file_of = |id: &str| cache.join(format!("{id}.json"));
-    let load = |path: &Path| std::fs::read_to_string(path).ok().and_then(|text| parse_advisory(&text));
+    let load = |path: &Path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| parse_advisory(&text))
+    };
     // Ids become file names and URL parts; anything unusual is skipped.
-    let safe = |id: &str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    let safe = |id: &str| {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
 
     // The batch endpoint and the advisory itself do not always agree on the
     // modification time, so we remember the batch value we downloaded for.
@@ -1011,9 +1128,25 @@ fn osv_details(
         let mut config = String::new();
         for id in batch {
             let url = format!("{}/{id}", osv::VULN_URL);
-            let _ = writeln!(config, "url = {}\noutput = {}", net::quote(&url), net::quote(&part_of(id).to_string_lossy()));
+            let _ = writeln!(
+                config,
+                "url = {}\noutput = {}",
+                net::quote(&url),
+                net::quote(&part_of(id).to_string_lossy())
+            );
         }
-        if let Err(err) = run_curl(&["--parallel", "--parallel-max", "16", "--max-time", "300", "--config", "-"], Some(&config)) {
+        if let Err(err) = run_curl(
+            &[
+                "--parallel",
+                "--parallel-max",
+                "16",
+                "--max-time",
+                "300",
+                "--config",
+                "-",
+            ],
+            Some(&config),
+        ) {
             error = Some(err);
         }
         downloaded += batch.len();
@@ -1066,13 +1199,19 @@ fn load_kev(cache: &Path) -> Result<BTreeMap<String, KevEntry>, String> {
             Ok(parsed)
         }
         // A stale catalog is better than none.
-        Err(err) => std::fs::read_to_string(&path).ok().and_then(|text| parse_kev(&text).ok()).ok_or(err),
+        Err(err) => std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| parse_kev(&text).ok())
+            .ok_or(err),
     }
 }
 
 fn parse_kev(text: &str) -> Result<BTreeMap<String, KevEntry>, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("invalid KEV catalog: {err}"))?;
-    let entries = value.get("vulnerabilities").and_then(Value::as_array).ok_or("KEV catalog has no `vulnerabilities`")?;
+    let entries = value
+        .get("vulnerabilities")
+        .and_then(Value::as_array)
+        .ok_or("KEV catalog has no `vulnerabilities`")?;
     Ok(entries
         .iter()
         .filter_map(|entry| {
@@ -1082,7 +1221,13 @@ fn parse_kev(text: &str) -> Result<BTreeMap<String, KevEntry>, String> {
                 date_added: field("dateAdded"),
                 ransomware: field("knownRansomwareCampaignUse").eq_ignore_ascii_case("known"),
             };
-            Some((cve, KevEntry { kev, name: field("vulnerabilityName") }))
+            Some((
+                cve,
+                KevEntry {
+                    kev,
+                    name: field("vulnerabilityName"),
+                },
+            ))
         })
         .collect())
 }
@@ -1113,7 +1258,10 @@ fn epss_lookup(cves: &BTreeSet<&str>, progress: &Progress) -> (BTreeMap<String, 
 /// EPSS returns numbers as strings: `{"cve": "CVE-…", "epss": "0.20158"}`.
 fn parse_epss(text: &str) -> Result<BTreeMap<String, f64>, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("invalid EPSS response: {err}"))?;
-    let data = value.get("data").and_then(Value::as_array).ok_or("EPSS response has no `data`")?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("EPSS response has no `data`")?;
     Ok(data
         .iter()
         .filter_map(|entry| {
@@ -1129,15 +1277,26 @@ fn parse_epss(text: &str) -> Result<BTreeMap<String, f64>, String> {
 /// Without an API key the NVD allows 5 requests per 30 seconds, so uncached
 /// lookups are spaced out; set `NVD_API_KEY` (environment or `.env`) to go
 /// ten times faster.
-fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, options: &Online, warnings: &mut Vec<String>) {
+fn nvd_lookup(
+    items: &mut [SystemItem],
+    kev: &BTreeMap<String, KevEntry>,
+    options: &Online,
+    warnings: &mut Vec<String>,
+) {
     let api_key = crate::envfile::lookup("NVD_API_KEY");
     let headers: Vec<String> = api_key.iter().map(|key| format!("apiKey: {key}")).collect();
     let pause = Duration::from_millis(if api_key.is_some() { 700 } else { 6500 });
     let cache = options.cache.join("nvd");
     let total = items.len();
     let mut requested = false;
-    let speed = if api_key.is_some() { "with an API key" } else { "no API key: slow" };
-    options.progress.stage(format!("Checking {total} system products in the NVD ({speed})"));
+    let speed = if api_key.is_some() {
+        "with an API key"
+    } else {
+        "no API key: slow"
+    };
+    options
+        .progress
+        .stage(format!("Checking {total} system products in the NVD ({speed})"));
 
     for (index, item) in items.iter_mut().enumerate() {
         if options.progress.cancelled() {
@@ -1153,7 +1312,9 @@ fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, option
                 options.progress.note(format!("{} {}", item.name, item.version));
                 if requested {
                     // Say why nothing seems to happen for a few seconds.
-                    options.progress.note(format!("  waiting {:.1}s for the NVD rate limit", pause.as_secs_f32()));
+                    options
+                        .progress
+                        .note(format!("  waiting {:.1}s for the NVD rate limit", pause.as_secs_f32()));
                     std::thread::sleep(pause);
                 }
                 requested = true;
@@ -1184,7 +1345,10 @@ fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, option
 /// Extracts the known-exploited CVEs from an NVD response.
 fn parse_nvd(text: &str, kev: &BTreeMap<String, KevEntry>) -> Result<Vec<SystemVuln>, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("invalid NVD response: {err}"))?;
-    let entries = value.get("vulnerabilities").and_then(Value::as_array).ok_or("NVD response has no `vulnerabilities`")?;
+    let entries = value
+        .get("vulnerabilities")
+        .and_then(Value::as_array)
+        .ok_or("NVD response has no `vulnerabilities`")?;
     let mut exploited: Vec<SystemVuln> = entries
         .iter()
         .filter_map(|entry| {
@@ -1194,8 +1358,12 @@ fn parse_nvd(text: &str, kev: &BTreeMap<String, KevEntry>) -> Result<Vec<SystemV
             let known = kev.get(id);
             Some(SystemVuln {
                 cve: id.to_string(),
-                name: field("cisaVulnerabilityName").or_else(|| known.map(|k| k.name.clone())).unwrap_or_default(),
-                date_added: field("cisaExploitAdd").or_else(|| known.map(|k| k.kev.date_added.clone())).unwrap_or_default(),
+                name: field("cisaVulnerabilityName")
+                    .or_else(|| known.map(|k| k.name.clone()))
+                    .unwrap_or_default(),
+                date_added: field("cisaExploitAdd")
+                    .or_else(|| known.map(|k| k.kev.date_added.clone()))
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -1253,7 +1421,12 @@ pub struct VulnReport {
 
 impl VulnReport {
     pub fn new(timestamp: String, scan: Scan) -> Self {
-        Self { tool: env!("CARGO_PKG_NAME"), version: env!("CARGO_PKG_VERSION"), timestamp, scan }
+        Self {
+            tool: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            timestamp,
+            scan,
+        }
     }
 
     pub fn to_json(&self) -> String {
@@ -1267,7 +1440,11 @@ impl VulnReport {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let short = |path: &Path| crate::secrets::display_path(path, home.as_deref());
 
-        let ecosystems: Vec<String> = scan.by_ecosystem.iter().map(|(name, count)| format!("{name} {count}")).collect();
+        let ecosystems: Vec<String> = scan
+            .by_ecosystem
+            .iter()
+            .map(|(name, count)| format!("{name} {count}"))
+            .collect();
         let _ = writeln!(out);
         let _ = writeln!(out, "{}", " Vulnerability Scan ".on_blue().white().bold());
         let _ = writeln!(
@@ -1298,11 +1475,20 @@ impl VulnReport {
             return out.trim_end().to_string();
         }
 
-        let _ = writeln!(out, "{}", "SYSTEM  (known-exploited vulnerabilities affecting the installed version)".bold());
+        let _ = writeln!(
+            out,
+            "{}",
+            "SYSTEM  (known-exploited vulnerabilities affecting the installed version)".bold()
+        );
         for item in &scan.system {
             let title = item.title();
             if let Some(error) = &item.error {
-                let _ = writeln!(out, "  {} {title:<34} {}", "?".yellow(), format!("lookup failed: {error}").dimmed());
+                let _ = writeln!(
+                    out,
+                    "  {} {title:<34} {}",
+                    "?".yellow(),
+                    format!("lookup failed: {error}").dimmed()
+                );
             } else if item.exploited.is_empty() {
                 let _ = writeln!(out, "  {} {title:<34} {}", "✔".green(), "none".dimmed());
             } else {
@@ -1311,13 +1497,24 @@ impl VulnReport {
                     "  {} {:<34} {}",
                     "✖".red(),
                     title.bold(),
-                    format!("{} known-exploited — update this product", item.exploited.len()).red().bold()
+                    format!("{} known-exploited — update this product", item.exploited.len())
+                        .red()
+                        .bold()
                 );
                 for vuln in item.exploited.iter().take(5) {
-                    let _ = writeln!(out, "      {} {}", vuln.cve, format!("{} (added {})", vuln.name, vuln.date_added).dimmed());
+                    let _ = writeln!(
+                        out,
+                        "      {} {}",
+                        vuln.cve,
+                        format!("{} (added {})", vuln.name, vuln.date_added).dimmed()
+                    );
                 }
                 if item.exploited.len() > 5 {
-                    let _ = writeln!(out, "      {}", format!("… and {} more", item.exploited.len() - 5).dimmed());
+                    let _ = writeln!(
+                        out,
+                        "      {}",
+                        format!("… and {} more", item.exploited.len() - 5).dimmed()
+                    );
                 }
             }
         }
@@ -1392,13 +1589,25 @@ impl VulnReport {
             let _ = writeln!(
                 out,
                 "{}",
-                format!("… and {} lower-priority findings (use --json for the full list)", scan.findings.len() - TEXT_LIMIT).dimmed()
+                format!(
+                    "… and {} lower-priority findings (use --json for the full list)",
+                    scan.findings.len() - TEXT_LIMIT
+                )
+                .dimmed()
             );
         }
 
         if !scan.projects.is_empty() {
             let _ = writeln!(out, "{rule}");
-            let _ = writeln!(out, "{}", format!("{:<52} {:>4} {:>4} {:>4} {:>4} {:>4}", "BY LOCKFILE", "KEV", "CRIT", "HIGH", "MED", "LOW").bold());
+            let _ = writeln!(
+                out,
+                "{}",
+                format!(
+                    "{:<52} {:>4} {:>4} {:>4} {:>4} {:>4}",
+                    "BY LOCKFILE", "KEV", "CRIT", "HIGH", "MED", "LOW"
+                )
+                .bold()
+            );
             for project in scan.projects.iter().take(PROJECT_LIMIT) {
                 let path = short(&project.path);
                 // Keep the end of long paths: that is where the project name is.
@@ -1413,7 +1622,11 @@ impl VulnReport {
                 );
             }
             if scan.projects.len() > PROJECT_LIMIT {
-                let _ = writeln!(out, "{}", format!("… and {} more lockfiles", scan.projects.len() - PROJECT_LIMIT).dimmed());
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    format!("… and {} more lockfiles", scan.projects.len() - PROJECT_LIMIT).dimmed()
+                );
             }
         }
 
@@ -1426,7 +1639,13 @@ impl VulnReport {
                 let _ = writeln!(out, "{}", "No known-exploited vulnerabilities found.".green().bold());
             }
             count => {
-                let _ = writeln!(out, "{}", format!("Known-exploited vulnerabilities found: {count}. Fix these first.").red().bold());
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    format!("Known-exploited vulnerabilities found: {count}. Fix these first.")
+                        .red()
+                        .bold()
+                );
             }
         }
         let _ = writeln!(
@@ -1443,7 +1662,11 @@ mod tests {
     use super::*;
 
     fn package(name: &str, version: &str) -> Package {
-        Package { ecosystem: "npm", name: name.to_string(), version: version.to_string() }
+        Package {
+            ecosystem: "npm",
+            name: name.to_string(),
+            version: version.to_string(),
+        }
     }
 
     fn finding(name: &str, severity: Severity, epss: Option<f64>, kev: bool) -> Finding {
@@ -1457,7 +1680,10 @@ mod tests {
             severity,
             malware: false,
             fixed: vec!["1.0.1".to_string()],
-            kev: kev.then(|| Kev { date_added: "2024-01-01".to_string(), ransomware: false }),
+            kev: kev.then(|| Kev {
+                date_added: "2024-01-01".to_string(),
+                ransomware: false,
+            }),
             epss,
             lockfile_count: 1,
             lockfiles: vec![PathBuf::from("/projects/app/package-lock.json")],
@@ -1472,7 +1698,10 @@ mod tests {
         assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), 6.1);
         assert_eq!(score("CVSS:3.0/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N"), 0.0);
         assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"), 10.0);
-        assert_eq!(cvss3_score("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"), None);
+        assert_eq!(
+            cvss3_score("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+            None
+        );
         assert_eq!(cvss3_score("CVSS:3.1/AV:X"), None);
     }
 
@@ -1487,10 +1716,23 @@ mod tests {
 
     #[test]
     fn osv_results_become_hits_per_package() {
-        let vuln = |id: &str, modified: &str| osv::Vuln { id: id.to_string(), modified: modified.to_string() };
-        let hits = flatten_hits(vec![vec![], vec![vuln("GHSA-x", "2025-01-01T00:00:00Z"), vuln("MAL-1", "")]]);
+        let vuln = |id: &str, modified: &str| osv::Vuln {
+            id: id.to_string(),
+            modified: modified.to_string(),
+        };
+        let hits = flatten_hits(vec![
+            vec![],
+            vec![vuln("GHSA-x", "2025-01-01T00:00:00Z"), vuln("MAL-1", "")],
+        ]);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0], OsvHit { package: 1, id: "GHSA-x".to_string(), modified: "2025-01-01T00:00:00Z".to_string() });
+        assert_eq!(
+            hits[0],
+            OsvHit {
+                package: 1,
+                id: "GHSA-x".to_string(),
+                modified: "2025-01-01T00:00:00Z".to_string()
+            }
+        );
         assert_eq!((hits[1].package, hits[1].id.as_str()), (1, "MAL-1"));
     }
 
@@ -1501,16 +1743,26 @@ mod tests {
              "ranges": [{"type": "GIT", "events": [{"fixed": "0123456789abcdef0123456789abcdef01234567"}]},
                         {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "4.1.0"}]}]}]}"#;
         let advisory = parse_advisory(text).unwrap();
-        let installed = Package { ecosystem: "PyPI", name: "typing-extensions".to_string(), version: "4.0.0".to_string() };
+        let installed = Package {
+            ecosystem: "PyPI",
+            name: "typing-extensions".to_string(),
+            version: "4.0.0".to_string(),
+        };
         assert_eq!(advisory.fixed_for(&installed), ["4.1.0"]);
         assert!(same_package("PyPI", "zope.interface", "Zope_Interface"));
-        assert!(!same_package("npm", "left-pad", "left_pad"), "only PyPI folds separators");
+        assert!(
+            !same_package("npm", "left-pad", "left_pad"),
+            "only PyPI folds separators"
+        );
     }
 
     #[test]
     fn cache_names_never_collide() {
         assert_eq!(cache_name("cpe:2.3:a:x:y:1.0-1"), "cpe_3a2.3_3aa_3ax_3ay_3a1.0-1");
-        assert_ne!(cache_name("a:signal-desktop:1.0-1"), cache_name("a:signal_desktop:1.0_1"));
+        assert_ne!(
+            cache_name("a:signal-desktop:1.0-1"),
+            cache_name("a:signal_desktop:1.0_1")
+        );
         assert_ne!(cache_name("a_3a"), cache_name("a:"));
     }
 
@@ -1527,7 +1779,11 @@ mod tests {
         let (advisories, error) = osv_details(&wanted, &cache, &Progress::none());
         std::fs::remove_dir_all(&cache).unwrap();
         assert_eq!(error, None);
-        assert_eq!(advisories.keys().collect::<Vec<_>>(), ["GHSA-1"], "unsafe ids are never used as paths");
+        assert_eq!(
+            advisories.keys().collect::<Vec<_>>(),
+            ["GHSA-1"],
+            "unsafe ids are never used as paths"
+        );
         assert_eq!(advisories["GHSA-1"].summary, "cached");
     }
 
@@ -1550,7 +1806,11 @@ mod tests {
         let advisory = parse_advisory(text).unwrap();
         assert_eq!(advisory.cves, ["CVE-2021-23337"]);
         assert_eq!(advisory.summary, "Command Injection in lodash");
-        assert_eq!(advisory.severity, Severity::Medium, "the database rating wins over the vector");
+        assert_eq!(
+            advisory.severity,
+            Severity::Medium,
+            "the database rating wins over the vector"
+        );
         assert_eq!(advisory.fixed_for(&package("lodash", "4.17.15")), ["4.17.21"]);
         assert!(advisory.fixed_for(&package("other", "1.0.0")).is_empty());
     }
@@ -1590,7 +1850,10 @@ mod tests {
         assert_eq!(kev["CVE-2024-1"].kev.date_added, "2024-02-02");
         assert!(parse_kev("{}").is_err());
 
-        let epss = parse_epss(r#"{"data": [{"cve": "CVE-2021-44228", "epss": "0.999990000"}, {"cve": "CVE-X", "epss": "bad"}]}"#).unwrap();
+        let epss = parse_epss(
+            r#"{"data": [{"cve": "CVE-2021-44228", "epss": "0.999990000"}, {"cve": "CVE-X", "epss": "bad"}]}"#,
+        )
+        .unwrap();
         assert_eq!(epss.len(), 1);
         assert!((epss["CVE-2021-44228"] - 0.99999).abs() < 1e-9);
     }
@@ -1603,7 +1866,14 @@ mod tests {
             {"cve": {"id": "CVE-2023-2"}}
         ]}"#;
         let exploited = parse_nvd(text, &kev).unwrap();
-        assert_eq!(exploited[0], SystemVuln { cve: "CVE-2023-2".to_string(), name: "From catalog".to_string(), date_added: "2023-05-05".to_string() });
+        assert_eq!(
+            exploited[0],
+            SystemVuln {
+                cve: "CVE-2023-2".to_string(),
+                name: "From catalog".to_string(),
+                date_added: "2023-05-05".to_string()
+            }
+        );
         assert_eq!(exploited[1].cve, "CVE-2023-1");
         assert!(parse_nvd(r#"{"vulnerabilities": []}"#, &kev).unwrap().is_empty());
         assert!(parse_nvd("<html>rate limited</html>", &kev).is_err());
@@ -1614,7 +1884,11 @@ mod tests {
         assert_eq!(clean_version("7.1.9 (88375)").as_deref(), Some("7.1.9"));
         assert_eq!(clean_version("157.0.8103.79").as_deref(), Some("157.0.8103.79"));
         assert_eq!(clean_version("Build 4215"), None);
-        assert_eq!(clean_version("1.0:*"), None, "characters with a meaning in CPE names are rejected");
+        assert_eq!(
+            clean_version("1.0:*"),
+            None,
+            "characters with a meaning in CPE names are rejected"
+        );
         assert_eq!(clean_version(""), None);
     }
 
@@ -1626,7 +1900,10 @@ mod tests {
         assert_eq!(item.title(), "openssl@3 3.4.0 (Homebrew)");
 
         assert!(formula_item("not-a-known-formula", "1.0").is_none());
-        assert!(formula_item("curl", "HEAD-1a2b3c4").is_none(), "a build from git has no version to look up");
+        assert!(
+            formula_item("curl", "HEAD-1a2b3c4").is_none(),
+            "a build from git has no version to look up"
+        );
         assert_eq!(strip_revision("8.11.1_2"), "8.11.1");
         assert_eq!(strip_revision("1.0_beta"), "1.0_beta");
         assert_eq!(strip_revision("7.1"), "7.1");
@@ -1640,7 +1917,12 @@ mod tests {
             assert!(!formula.contains('@'), "{formula}: list the unversioned name");
             let parts: Vec<&str> = product.split(':').collect();
             assert_eq!(parts.len(), 2, "{product} must be vendor:product");
-            assert!(parts.iter().all(|part| !part.is_empty() && !part.contains(['*', '?', ' ', '/'])), "{product}");
+            assert!(
+                parts
+                    .iter()
+                    .all(|part| !part.is_empty() && !part.contains(['*', '?', ' ', '/'])),
+                "{product}"
+            );
             assert_eq!(*product, product.to_lowercase(), "CPE names are lowercase");
         }
     }
@@ -1649,7 +1931,14 @@ mod tests {
     fn cellar_is_read_without_running_brew() {
         let cellar = std::env::temp_dir().join(format!("swordcheck-cellar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cellar);
-        for dir in ["curl/8.11.1_1", "openssl@3/3.4.0", "openssl@3/3.3.2", "some-private-tool/0.1.0", "empty", "curl/.metadata"] {
+        for dir in [
+            "curl/8.11.1_1",
+            "openssl@3/3.4.0",
+            "openssl@3/3.3.2",
+            "some-private-tool/0.1.0",
+            "empty",
+            "curl/.metadata",
+        ] {
             std::fs::create_dir_all(cellar.join(dir)).unwrap();
         }
         std::fs::write(cellar.join("stray-file"), "").unwrap();
@@ -1658,14 +1947,28 @@ mod tests {
         std::fs::remove_dir_all(&cellar).unwrap();
 
         let titles: Vec<String> = items.iter().map(SystemItem::title).collect();
-        assert_eq!(titles, ["curl 8.11.1 (Homebrew)", "openssl@3 3.3.2 (Homebrew)", "openssl@3 3.4.0 (Homebrew)"]);
-        assert_eq!(unmatched, 1, "only the installed formula that is not in the table counts");
-        assert_eq!(homebrew_items(&cellar), (Vec::new(), 0), "a missing Cellar is not an error");
+        assert_eq!(
+            titles,
+            [
+                "curl 8.11.1 (Homebrew)",
+                "openssl@3 3.3.2 (Homebrew)",
+                "openssl@3 3.4.0 (Homebrew)"
+            ]
+        );
+        assert_eq!(
+            unmatched, 1,
+            "only the installed formula that is not in the table counts"
+        );
+        assert_eq!(
+            homebrew_items(&cellar),
+            (Vec::new(), 0),
+            "a missing Cellar is not an error"
+        );
     }
 
     #[test]
     fn findings_are_ranked_by_exploitation_then_probability_then_severity() {
-        let mut findings = vec![
+        let mut findings = [
             finding("low-risk-critical", Severity::Critical, Some(0.001), false),
             finding("likely-medium", Severity::Medium, Some(0.9), false),
             finding("exploited-low", Severity::Low, None, true),
@@ -1674,7 +1977,16 @@ mod tests {
         ];
         findings.sort_by(priority);
         let order: Vec<&str> = findings.iter().map(|f| f.package.as_str()).collect();
-        assert_eq!(order, ["exploited-low", "likely-medium", "low-risk-critical", "unscored-critical", "unscored-high"]);
+        assert_eq!(
+            order,
+            [
+                "exploited-low",
+                "likely-medium",
+                "low-risk-critical",
+                "unscored-critical",
+                "unscored-high"
+            ]
+        );
     }
 
     #[test]
@@ -1702,13 +2014,23 @@ mod tests {
             packages: packages.iter().cloned().collect(),
         };
         let shared = package("shared", "1.0.0");
-        let cargo = Package { ecosystem: "crates.io", name: "serde".to_string(), version: "1.0.0".to_string() };
+        let cargo = Package {
+            ecosystem: "crates.io",
+            name: "serde".to_string(),
+            version: "1.0.0".to_string(),
+        };
         let lockfiles = [
             lockfile("/a/package-lock.json", &[shared.clone(), package("only-a", "1.0.0")]),
-            lockfile("/b/package-lock.json", &[shared.clone()]),
+            lockfile("/b/package-lock.json", std::slice::from_ref(&shared)),
             lockfile("/c/Cargo.lock", &[cargo]),
         ];
-        let scan = offline(&lockfiles, System { items: vec![system_item(Source::Os, "macOS", "15.0", "cpe".to_string())], unmatched_formulae: 4 });
+        let scan = offline(
+            &lockfiles,
+            System {
+                items: vec![system_item(Source::Os, "macOS", "15.0", "cpe".to_string())],
+                unmatched_formulae: 4,
+            },
+        );
         assert!(!scan.online);
         assert_eq!((scan.lockfiles, scan.packages), (3, 3));
         assert_eq!(scan.by_ecosystem, BTreeMap::from([("crates.io", 1), ("npm", 2)]));
@@ -1726,12 +2048,26 @@ mod tests {
             online: true,
             lockfiles: 1,
             packages: 2,
-            findings: vec![finding("pkg-a", Severity::High, Some(0.5), true), finding("pkg-b", Severity::Low, None, false)],
-            projects: vec![ProjectSummary { path: PathBuf::from("/projects/app/package-lock.json"), packages: 2, exploited: 1, high: 1, low: 1, ..Default::default() }],
+            findings: vec![
+                finding("pkg-a", Severity::High, Some(0.5), true),
+                finding("pkg-b", Severity::Low, None, false),
+            ],
+            projects: vec![ProjectSummary {
+                path: PathBuf::from("/projects/app/package-lock.json"),
+                packages: 2,
+                exploited: 1,
+                high: 1,
+                low: 1,
+                ..Default::default()
+            }],
             ..Scan::default()
         };
         scan.system = vec![SystemItem {
-            exploited: vec![SystemVuln { cve: "CVE-2025-1".to_string(), name: "Browser bug".to_string(), date_added: "2025-01-01".to_string() }],
+            exploited: vec![SystemVuln {
+                cve: "CVE-2025-1".to_string(),
+                name: "Browser bug".to_string(),
+                date_added: "2025-01-01".to_string(),
+            }],
             checked: true,
             ..system_item(Source::App, "Browser", "1.0", "cpe".to_string())
         }];
@@ -1739,7 +2075,10 @@ mod tests {
 
         colored::control::set_override(false);
         let text = VulnReport::new("now".to_string(), scan).to_text();
-        assert!(text.contains("[KEV] [HIGH] pkg-a 1.0.0 (npm)  CVE-2024-pkg-a · EPSS 50.0%"), "{text}");
+        assert!(
+            text.contains("[KEV] [HIGH] pkg-a 1.0.0 (npm)  CVE-2024-pkg-a · EPSS 50.0%"),
+            "{text}"
+        );
         assert!(text.contains("fixed in 1.0.1"));
         assert!(text.contains("CVE-2025-1"));
         assert!(text.contains("Known-exploited vulnerabilities found: 2"));

@@ -48,12 +48,7 @@ pub struct Report {
 
 impl Report {
     /// Builds a report from the results; if `previous` is given, the diff is computed too.
-    pub fn new(
-        timestamp: String,
-        os_version: String,
-        checks: Vec<CheckResult>,
-        previous: Option<&RunRecord>,
-    ) -> Self {
+    pub fn new(timestamp: String, os_version: String, checks: Vec<CheckResult>, previous: Option<&RunRecord>) -> Self {
         let scored = score::score_if_scorable(&checks);
         let score = scored.unwrap_or(score::NOTHING_SCORABLE);
         Self {
@@ -78,7 +73,11 @@ impl Report {
 
     /// "87/100", or "n/a" when no check could be evaluated.
     fn score_label(&self) -> String {
-        if self.scorable { format!("{}/100", self.score) } else { "n/a".to_string() }
+        if self.scorable {
+            format!("{}/100", self.score)
+        } else {
+            "n/a".to_string()
+        }
     }
 
     /// Fail/Warn checks that have no exception defined.
@@ -165,11 +164,7 @@ impl Report {
             };
             let _ = writeln!(out, "  Score: {} → {} ({trend})", previous.score, self.score);
             for change in &self.changes {
-                let arrow = if change.improved() {
-                    "▲".green()
-                } else {
-                    "▼".red()
-                };
+                let arrow = if change.improved() { "▲".green() } else { "▼".red() };
                 let _ = writeln!(
                     out,
                     "  {arrow} {}: {} → {}",
@@ -220,8 +215,7 @@ impl Report {
         let _ = write!(
             out,
             "{}",
-            "Note: This tool only audits local configuration; it is not a comprehensive security scan."
-                .dimmed()
+            "Note: This tool only audits local configuration; it is not a comprehensive security scan.".dimmed()
         );
         out
     }
@@ -318,7 +312,10 @@ impl Report {
                 "<li><strong>{}</strong>: {}{}</li>",
                 escape_html(issue.name),
                 escape_html(issue.advice),
-                issue.fix.map(|fix| format!("<br>Run: <code>{}</code>", escape_html(&fix.command_line()))).unwrap_or_default()
+                issue
+                    .fix
+                    .map(|fix| format!("<br>Run: <code>{}</code>", escape_html(&fix.command_line())))
+                    .unwrap_or_default()
             );
         }
         let advice = if advice.is_empty() {
@@ -473,7 +470,10 @@ pub fn short_time(timestamp: &str) -> String {
 /// Makes text safe for a Markdown table cell: a `|` or a line break would
 /// end the cell or the whole row.
 fn markdown_cell(text: &str) -> String {
-    text.replace('|', "\\|").split_whitespace().collect::<Vec<_>>().join(" ")
+    text.replace('|', "\\|")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Escapes special characters in text that will be embedded in HTML.
@@ -495,10 +495,7 @@ mod tests {
     }
 
     fn sample() -> Report {
-        let before = [
-            result("firewall", Status::Fail, 20),
-            result("sip", Status::Pass, 20),
-        ];
+        let before = [result("firewall", Status::Fail, 20), result("sip", Status::Pass, 20)];
         let previous = RunRecord::new("2026-11-01T09:00:00+03:00".into(), "macOS 26".into(), 50, &before);
 
         let mut exempt = result("ssh", Status::Warn, 10);
@@ -523,7 +520,11 @@ mod tests {
         assert_eq!(report.grade, "D");
         assert_eq!(report.changes.len(), 2);
         assert_eq!(report.previous.as_ref().unwrap().score, 50);
-        assert_eq!(report.issues().count(), 1, "an exempted check does not count as an issue");
+        assert_eq!(
+            report.issues().count(),
+            1,
+            "an exempted check does not count as an issue"
+        );
     }
 
     #[test]

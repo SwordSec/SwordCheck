@@ -46,7 +46,12 @@ struct Rule {
 }
 
 const fn rule(id: &'static str, provider: &'static str, pattern: &'static str) -> Rule {
-    Rule { id, provider, pattern, file_hint: None }
+    Rule {
+        id,
+        provider,
+        pattern,
+        file_hint: None,
+    }
 }
 
 const PRIVATE_KEY: &str = "private-key";
@@ -62,7 +67,11 @@ const RULES: &[Rule] = &[
     rule("anthropic", "Anthropic", r"\bsk-ant-[A-Za-z0-9_-]{24,}"),
     rule("openrouter", "OpenRouter", r"\bsk-or-v1-[a-f0-9]{64}\b"),
     rule("openai", "OpenAI", r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{24,}"),
-    rule("openai-legacy", "OpenAI", r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b"),
+    rule(
+        "openai-legacy",
+        "OpenAI",
+        r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b",
+    ),
     rule("aws-access-key", "AWS", r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     rule(
         "aws-secret-key",
@@ -218,8 +227,11 @@ impl SkippedFiles {
             (self.binary, "binary or not text".to_string()),
             (self.unreadable, "unreadable".to_string()),
         ];
-        let parts: Vec<String> =
-            parts.into_iter().filter(|(count, _)| *count > 0).map(|(count, why)| format!("{count} {why}")).collect();
+        let parts: Vec<String> = parts
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, why)| format!("{count} {why}"))
+            .collect();
         parts.join(", ")
     }
 }
@@ -271,18 +283,15 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
     let mut matches = Vec::new();
     // Claimed byte ranges: a second rule must not report the same fragment.
     let mut taken: Vec<(usize, usize)> = Vec::new();
-    let overlaps = |taken: &[(usize, usize)], start: usize, end: usize| {
-        taken.iter().any(|&(s, e)| start < e && s < end)
-    };
+    let overlaps =
+        |taken: &[(usize, usize)], start: usize, end: usize| taken.iter().any(|&(s, e)| start < e && s < end);
 
     // Templates such as `.env.example` are committed on purpose and contain
     // made-up passwords; only real key patterns are searched for there.
     let template = is_template(file_name);
 
     for (rule, regex) in &compiled.rules {
-        if rule.file_hint.is_some_and(|hint| !file_name.contains(hint))
-            || (template && rule.id == URL_PASSWORD)
-        {
+        if rule.file_hint.is_some_and(|hint| !file_name.contains(hint)) || (template && rule.id == URL_PASSWORD) {
             continue;
         }
         for captures in regex.captures_iter(text) {
@@ -341,9 +350,7 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
         let (Some(name), Some(value)) = (captures.get(1), captures.get(2)) else {
             continue;
         };
-        if overlaps(&taken, value.start(), value.end())
-            || !looks_secret(name.as_str(), value.as_str())
-        {
+        if overlaps(&taken, value.start(), value.end()) || !looks_secret(name.as_str(), value.as_str()) {
             continue;
         }
         taken.push((value.start(), value.end()));
@@ -408,15 +415,19 @@ fn is_placeholder(value: &str) -> bool {
 
     // Something to fill in or to be substituted: `<token>`, `${VAR}`, `$(cmd)`, `{{ var }}`.
     const WRAPPERS: [(&str, &str); 4] = [("<", ">"), ("${", "}"), ("$(", ")"), ("{{", "}}")];
-    if WRAPPERS.iter().any(|(open, close)| lower.starts_with(open) && lower.ends_with(close)) {
+    if WRAPPERS
+        .iter()
+        .any(|(open, close)| lower.starts_with(open) && lower.ends_with(close))
+    {
         return true;
     }
-    let identifier = |text: &str| {
-        !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    };
+    let identifier = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     // `$VAR` and `%VAR%`.
     if lower.strip_prefix('$').is_some_and(identifier)
-        || lower.strip_prefix('%').and_then(|rest| rest.strip_suffix('%')).is_some_and(identifier)
+        || lower
+            .strip_prefix('%')
+            .and_then(|rest| rest.strip_suffix('%'))
+            .is_some_and(identifier)
     {
         return true;
     }
@@ -446,14 +457,41 @@ fn is_placeholder(value: &str) -> bool {
     // `replace-with-token`. At least one word must be a real marker, so that
     // a weak but real value such as `secret-password` is still reported.
     const MARKERS: [&str; 30] = [
-        "your", "yours", "yourkey", "here", "changeme", "change", "changeit", "changethis", "example",
-        "sample", "placeholder", "dummy", "redacted", "insert", "replace", "replaceme", "todo", "fixme",
-        "tbd", "fake", "foo", "bar", "baz", "foobar", "hidden", "masked", "removed", "enter", "put", "add",
+        "your",
+        "yours",
+        "yourkey",
+        "here",
+        "changeme",
+        "change",
+        "changeit",
+        "changethis",
+        "example",
+        "sample",
+        "placeholder",
+        "dummy",
+        "redacted",
+        "insert",
+        "replace",
+        "replaceme",
+        "todo",
+        "fixme",
+        "tbd",
+        "fake",
+        "foo",
+        "bar",
+        "baz",
+        "foobar",
+        "hidden",
+        "masked",
+        "removed",
+        "enter",
+        "put",
+        "add",
     ];
     const FILLER: [&str; 36] = [
-        "api", "key", "apikey", "token", "secret", "password", "passwd", "pass", "pwd", "my", "me", "the",
-        "a", "an", "of", "for", "is", "this", "it", "value", "access", "private", "public", "client", "id",
-        "user", "username", "name", "string", "auth", "app", "db", "new", "real", "goes", "with",
+        "api", "key", "apikey", "token", "secret", "password", "passwd", "pass", "pwd", "my", "me", "the", "a", "an",
+        "of", "for", "is", "this", "it", "value", "access", "private", "public", "client", "id", "user", "username",
+        "name", "string", "auth", "app", "db", "new", "real", "goes", "with",
     ];
     let mut marker_seen = false;
     for word in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
@@ -549,11 +587,18 @@ fn parse_host(text: &str) -> Option<(&str, usize)> {
 /// Returns the text unchanged if the result would not be valid UTF-8.
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
-    let hex = |index: usize| bytes.get(index).and_then(|&byte| (byte as char).to_digit(16)).map(|digit| digit as u8);
+    let hex = |index: usize| {
+        bytes
+            .get(index)
+            .and_then(|&byte| (byte as char).to_digit(16))
+            .map(|digit| digit as u8)
+    };
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && let (Some(high), Some(low)) = (hex(index + 1), hex(index + 2)) {
+        if bytes[index] == b'%'
+            && let (Some(high), Some(low)) = (hex(index + 1), hex(index + 2))
+        {
             decoded.push(high * 16 + low);
             index += 3;
         } else {
@@ -581,17 +626,26 @@ fn is_local_host(host: &str) -> bool {
 fn is_documentation_host(host: &str) -> bool {
     let lower = host.to_lowercase();
     // `sha256` is not a host: `image:tag@sha256:…` is a container image reference.
-    ["example.com", "example.org", "example.net", "example", "invalid", "sha256", "sha512"]
-        .iter()
-        .any(|reserved| lower == *reserved || lower.ends_with(&format!(".{reserved}")))
+    [
+        "example.com",
+        "example.org",
+        "example.net",
+        "example",
+        "invalid",
+        "sha256",
+        "sha512",
+    ]
+    .iter()
+    .any(|reserved| lower == *reserved || lower.ends_with(&format!(".{reserved}")))
 }
 
 /// Development defaults such as `postgres:postgres@localhost`: a password
 /// equal to the user name or a well-known default, on a local host. The same
 /// password on a real host is reported.
 fn is_dev_default(user: &str, password: &str, host: &str) -> bool {
-    const DEFAULTS: [&str; 10] =
-        ["postgres", "password", "root", "admin", "example", "secret", "changeme", "user", "pass", "test"];
+    const DEFAULTS: [&str; 10] = [
+        "postgres", "password", "root", "admin", "example", "secret", "changeme", "user", "pass", "test",
+    ];
     let lower = password.to_lowercase();
     is_local_host(host) && (lower == user.to_lowercase() || DEFAULTS.contains(&lower.as_str()))
 }
@@ -629,7 +683,9 @@ fn is_date(value: &str) -> bool {
     bytes.len() >= 10
         && bytes[4] == b'-'
         && bytes[7] == b'-'
-        && [0, 1, 2, 3, 5, 6, 8, 9].iter().all(|&index| bytes[index].is_ascii_digit())
+        && [0, 1, 2, 3, 5, 6, 8, 9]
+            .iter()
+            .all(|&index| bytes[index].is_ascii_digit())
 }
 
 /// Shannon entropy (bits per character). High for random keys, low for
@@ -675,7 +731,11 @@ fn public_prefix(rule: &str, secret: &str) -> &'static str {
         "jwt" => &["eyJ"],
         _ => &[],
     };
-    candidates.iter().copied().find(|prefix| secret.starts_with(prefix)).unwrap_or("")
+    candidates
+        .iter()
+        .copied()
+        .find(|prefix| secret.starts_with(prefix))
+        .unwrap_or("")
 }
 
 /// Values shorter than this are never shown, not even partially.
@@ -742,7 +802,12 @@ fn decode(bytes: &[u8]) -> Option<String> {
 }
 
 fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| unit([pair[0], pair[1]])).collect();
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| unit([pair[0], pair[1]]))
+        .collect();
     String::from_utf16_lossy(&units)
 }
 
@@ -845,7 +910,9 @@ pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
     let scanned = AtomicUsize::new(0);
     let (too_large, binary, unreadable) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
     let collected: Mutex<Vec<Finding>> = Mutex::new(Vec::new());
-    let workers = std::thread::available_parallelism().map_or(4, usize::from).min(files.len().max(1));
+    let workers = std::thread::available_parallelism()
+        .map_or(4, usize::from)
+        .min(files.len().max(1));
 
     // `scope` lets the threads borrow local variables: all of them are
     // guaranteed to finish before the scope ends.
@@ -869,7 +936,7 @@ pub fn scan_with(files: &[PathBuf], progress: &Progress) -> Scan {
                     skipped.fetch_add(1, Ordering::Relaxed);
                     // Reporting every file would cost more than scanning it.
                     let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count % 8 == 0 || count == files.len() {
+                    if count.is_multiple_of(8) || count == files.len() {
                         progress.step(count, files.len());
                         progress.note(display_path(path, home().as_deref()));
                     }
@@ -1007,9 +1074,25 @@ const HIDDEN_PROJECT_FILES: [&str; 7] = [
 
 /// Directories that are not descended into: dependencies and build outputs.
 const SKIP_DIRS: [&str; 19] = [
-    "testdata", "_testfiles", "fixtures",
-    "node_modules", "target", "vendor", "Pods", "venv", "env", "__pycache__", "dist", "build",
-    "DerivedData", "site-packages", "bower_components", "Carthage", "coverage", "out", "tmp",
+    "testdata",
+    "_testfiles",
+    "fixtures",
+    "node_modules",
+    "target",
+    "vendor",
+    "Pods",
+    "venv",
+    "env",
+    "__pycache__",
+    "dist",
+    "build",
+    "DerivedData",
+    "site-packages",
+    "bower_components",
+    "Carthage",
+    "coverage",
+    "out",
+    "tmp",
 ];
 
 /// Default targets: the known files in the home directory, `~/.ssh` and
@@ -1022,9 +1105,12 @@ pub fn default_files() -> Vec<PathBuf> {
 
     // Any file inside `~/.ssh` may be a private key; the names are arbitrary.
     if let Ok(entries) = std::fs::read_dir(home.join(".ssh")) {
-        files.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
-            path.extension().is_none_or(|extension| extension != "pub")
-        }));
+        files.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_none_or(|extension| extension != "pub")),
+        );
     }
 
     // Large top-level folders that contain no projects are skipped.
@@ -1051,7 +1137,12 @@ fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        found.extend(HIDDEN_PROJECT_FILES.iter().map(|relative| dir.join(relative)).filter(|p| p.is_file()));
+        found.extend(
+            HIDDEN_PROJECT_FILES
+                .iter()
+                .map(|relative| dir.join(relative))
+                .filter(|p| p.is_file()),
+        );
 
         for entry in entries.flatten() {
             // `file_type` does not follow links; symbolic links count as neither
@@ -1087,8 +1178,18 @@ fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
 /// Is the file name a candidate for holding secrets?
 fn is_candidate(name: &str) -> bool {
     const EXACT: [&str; 12] = [
-        ".npmrc", ".netrc", ".pypirc", ".mcp.json", ".envrc", "credentials.json", "credentials",
-        "secrets.json", "secrets.yml", "secrets.yaml", "secrets.toml", "local.settings.json",
+        ".npmrc",
+        ".netrc",
+        ".pypirc",
+        ".mcp.json",
+        ".envrc",
+        "credentials.json",
+        "credentials",
+        "secrets.json",
+        "secrets.yml",
+        "secrets.yaml",
+        "secrets.toml",
+        "local.settings.json",
     ];
     const SUFFIXES: [&str; 7] = [".env", ".tfstate", ".tfvars", ".pem", ".key", ".p8", ".tfstate.backup"];
     let lower = name.to_lowercase();
@@ -1154,7 +1255,12 @@ impl SecretsReport {
             let _ = writeln!(
                 out,
                 "{}",
-                format!(" {} files skipped, not scanned: {}", scan.files_skipped, scan.skipped.reasons()).yellow()
+                format!(
+                    " {} files skipped, not scanned: {}",
+                    scan.files_skipped,
+                    scan.skipped.reasons()
+                )
+                .yellow()
             );
         }
         let _ = writeln!(out, "{rule}");
@@ -1167,7 +1273,10 @@ impl SecretsReport {
         let _ = writeln!(out, "{}", "SUMMARY".bold());
         for row in &scan.summary {
             let tracked = if row.git_tracked > 0 {
-                format!("  {} locations tracked in git", row.git_tracked).red().bold().to_string()
+                format!("  {} locations tracked in git", row.git_tracked)
+                    .red()
+                    .bold()
+                    .to_string()
             } else {
                 String::new()
             };
@@ -1211,7 +1320,9 @@ impl SecretsReport {
             if finding.git_tracked {
                 flags.push("TRACKED IN GIT".red().bold().to_string());
             }
-            if finding.others_can_read && let Some(mode) = &finding.mode {
+            if finding.others_can_read
+                && let Some(mode) = &finding.mode
+            {
                 flags.push(format!("mode {mode}").yellow().to_string());
             }
             let _ = writeln!(
@@ -1243,7 +1354,8 @@ impl SecretsReport {
             let _ = writeln!(
                 out,
                 "{}",
-                format!("Locations where the file is readable by other users: {loose}. Fix with `chmod 600 FILE`.").yellow()
+                format!("Locations where the file is readable by other users: {loose}. Fix with `chmod 600 FILE`.")
+                    .yellow()
             );
         }
         let _ = writeln!(
@@ -1272,8 +1384,7 @@ mod tests {
 
     impl TempDir {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("swordcheck-secrets-{label}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("swordcheck-secrets-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             // On macOS the temporary directory lives under a symbolic link.
@@ -1302,7 +1413,9 @@ mod tests {
         let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (0..len)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 alphabet[(state >> 33) as usize % alphabet.len()]
             })
             .collect()
@@ -1355,7 +1468,11 @@ mod tests {
     fn variable_name_and_line_are_found() {
         let text = format!("# comment\nexport ANTHROPIC_API_KEY=\"{}\"\n", anthropic_key(1));
         let found = scan_text(".zshrc", &text);
-        assert_eq!(found.len(), 1, "the generic rule must not report the same value a second time");
+        assert_eq!(
+            found.len(),
+            1,
+            "the generic rule must not report the same value a second time"
+        );
         assert_eq!(found[0].name.as_deref(), Some("ANTHROPIC_API_KEY"));
 
         let text = format!("{{\n  \"apiKey\": \"{}\"\n}}", anthropic_key(1));
@@ -1379,7 +1496,11 @@ mod tests {
 
     #[test]
     fn generic_assignment_with_random_value_is_caught() {
-        let text = format!("MY_SERVICE_TOKEN={}\nDB_PASSWORD='{}'\n", random(ALNUM, 32, 1), random(ALNUM, 14, 2));
+        let text = format!(
+            "MY_SERVICE_TOKEN={}\nDB_PASSWORD='{}'\n",
+            random(ALNUM, 32, 1),
+            random(ALNUM, 14, 2)
+        );
         let found = scan_text(".env", &text);
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|f| f.rule == GENERIC));
@@ -1440,7 +1561,10 @@ mod tests {
         assert!(rules_hit("a.pem", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIF\n").is_empty());
 
         // In a service account JSON the key is embedded on a single line.
-        let json = format!("\"private_key\": \"-----BEGIN PRIVATE KEY-----\\n{}\\n\"", random(ALNUM, 40, 2));
+        let json = format!(
+            "\"private_key\": \"-----BEGIN PRIVATE KEY-----\\n{}\\n\"",
+            random(ALNUM, 40, 2)
+        );
         assert_eq!(rules_hit("sa.json", &json), [PRIVATE_KEY]);
     }
 
@@ -1475,7 +1599,13 @@ mod tests {
             .collect();
         assert_eq!(
             found,
-            ["app/.env", "app/.env.production", "app/.git/config", "app/config/prod.env", "app/infra/terraform.tfstate"]
+            [
+                "app/.env",
+                "app/.env.production",
+                "app/.git/config",
+                "app/config/prod.env",
+                "app/infra/terraform.tfstate"
+            ]
         );
     }
 
@@ -1494,7 +1624,12 @@ mod tests {
         assert_eq!(scan.unique_secrets(), 2);
         assert_eq!(
             scan.summary,
-            [ProviderSummary { provider: "Anthropic", secrets: 2, locations: 3, git_tracked: 0 }]
+            [ProviderSummary {
+                provider: "Anthropic",
+                secrets: 2,
+                locations: 3,
+                git_tracked: 0
+            }]
         );
 
         let in_a = scan.findings.iter().find(|f| f.path.ends_with("a/.env")).unwrap();
@@ -1532,7 +1667,12 @@ mod tests {
         dir.write("tracked.env", &format!("K={}\n", anthropic_key(1)));
         dir.write("untracked.env", &format!("K={}\n", anthropic_key(2)));
         let git = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(&dir.0).args(args).output().is_ok_and(|o| o.status.success())
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir.0)
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
         };
         if !git(&["init", "-q"]) || !git(&["add", "tracked.env"]) {
             return; // without git this test is meaningless
@@ -1554,7 +1694,10 @@ mod tests {
     /// mask without its ` (N chars)` suffix.
     fn shown(masked: &str, secret: &str) -> String {
         let suffix = format!(" ({} chars)", secret.chars().count());
-        masked.strip_suffix(&suffix).unwrap_or_else(|| panic!("no length suffix in {masked:?}")).to_string()
+        masked
+            .strip_suffix(&suffix)
+            .unwrap_or_else(|| panic!("no length suffix in {masked:?}"))
+            .to_string()
     }
 
     #[test]
@@ -1577,7 +1720,11 @@ mod tests {
         assert_eq!(found[0].rule, DOCKER_AUTH);
         let masked = mask(found[0].rule, &found[0].secret);
         assert_eq!(masked, "•••• (44 chars)");
-        let windows: Vec<String> = auth.as_bytes().windows(3).map(|w| String::from_utf8_lossy(w).into_owned()).collect();
+        let windows: Vec<String> = auth
+            .as_bytes()
+            .windows(3)
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect();
         assert!(windows.iter().all(|window| !masked.contains(window.as_str())));
 
         // Short provider keys are hidden too: a prefix plus a tail would be most of the value.
@@ -1589,11 +1736,17 @@ mod tests {
     fn mask_shows_at_most_the_public_prefix_and_a_short_tail() {
         // 40-character AWS secret: no public prefix, only the last four characters.
         let aws_secret = random(ALNUM, 40, 1);
-        assert_eq!(shown(&mask("aws-secret-key", &aws_secret), &aws_secret), format!("…{}", &aws_secret[36..]));
+        assert_eq!(
+            shown(&mask("aws-secret-key", &aws_secret), &aws_secret),
+            format!("…{}", &aws_secret[36..])
+        );
 
         // 20-character access key id: the prefix and two characters.
         let access_key = format!("AKIA{}", random(UPPER, 16, 2));
-        assert_eq!(shown(&mask("aws-access-key", &access_key), &access_key), format!("AKIA…{}", &access_key[18..]));
+        assert_eq!(
+            shown(&mask("aws-access-key", &access_key), &access_key),
+            format!("AKIA…{}", &access_key[18..])
+        );
 
         let cases = [
             ("anthropic", "sk-ant-", anthropic_key(3)),
@@ -1611,11 +1764,17 @@ mod tests {
             assert!((2..=4).contains(&tail.len()), "{rule}: tail is {tail:?}");
             assert!(key.ends_with(tail));
             let secret_part = key.len() - prefix.len();
-            assert!(tail.len() * 8 <= secret_part, "{rule}: at most an eighth of the secret part");
+            assert!(
+                tail.len() * 8 <= secret_part,
+                "{rule}: at most an eighth of the secret part"
+            );
             // Nothing else: no five consecutive characters of the secret part appear.
             let hidden = &key[prefix.len()..key.len() - tail.len()];
             for window in hidden.as_bytes().windows(5) {
-                assert!(!masked.contains(std::str::from_utf8(window).unwrap()), "{rule} leaks {masked}");
+                assert!(
+                    !masked.contains(std::str::from_utf8(window).unwrap()),
+                    "{rule} leaks {masked}"
+                );
             }
         }
     }
@@ -1652,14 +1811,40 @@ mod tests {
     #[test]
     fn placeholders_are_whole_value_shapes() {
         for value in [
-            "<your-key>", "<token>", "xxxxxxxx", "XXXXXXXXXXXXXXXX", "********", "...", "changeme", "changeme123",
-            "CHANGE_ME", "your_api_key_here", "your-token", "${VAR}", "${DB_PASSWORD:-}", "$DB_PASSWORD",
-            "%API_KEY%", "{{ secrets.token }}", "$(gh auth token)", "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
-            "sk-proj-...", "AKIAIOSFODNN7EXAMPLE", "replace-with-your-token", "dummy", "REDACTED",
+            "<your-key>",
+            "<token>",
+            "xxxxxxxx",
+            "XXXXXXXXXXXXXXXX",
+            "********",
+            "...",
+            "changeme",
+            "changeme123",
+            "CHANGE_ME",
+            "your_api_key_here",
+            "your-token",
+            "${VAR}",
+            "${DB_PASSWORD:-}",
+            "$DB_PASSWORD",
+            "%API_KEY%",
+            "{{ secrets.token }}",
+            "$(gh auth token)",
+            "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx",
+            "sk-proj-...",
+            "AKIAIOSFODNN7EXAMPLE",
+            "replace-with-your-token",
+            "dummy",
+            "REDACTED",
         ] {
             assert!(is_placeholder(value), "{value} is a placeholder");
         }
-        for value in ["p4ssw0rd<Zq9!x", "secret-password", "hunter2Zq9", "Zq9...Ab3", "a<b>c9Zq", "insertK9sampleQ2"] {
+        for value in [
+            "p4ssw0rd<Zq9!x",
+            "secret-password",
+            "hunter2Zq9",
+            "Zq9...Ab3",
+            "a<b>c9Zq",
+            "insertK9sampleQ2",
+        ] {
             assert!(!is_placeholder(value), "{value} is not a placeholder");
         }
         assert!(rules_hit(".env", "API_TOKEN=os.getenv(\nAPI_TOKEN=get_token()\n").is_empty());
@@ -1702,13 +1887,26 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            [(1, "DB_PASSWORD", true), (1, "DB_PASSWORD", false), (2, "REDIS_PASSWORD", true), (2, "REDIS_PASSWORD", false)]
+            [
+                (1, "DB_PASSWORD", true),
+                (1, "DB_PASSWORD", false),
+                (2, "REDIS_PASSWORD", true),
+                (2, "REDIS_PASSWORD", false)
+            ]
         );
 
         let text = SecretsReport::new("2026-01-01T00:00:00+00:00".to_string(), scan).to_text();
         assert_eq!(text.matches("(in 2 places)").count(), 2, "{text}");
-        assert_eq!(text.matches("•••• (12 chars)").count(), 2, "one header per secret:\n{text}");
-        assert_eq!(text.matches("Generic (by name)").count(), 2, "summary row and one section:\n{text}");
+        assert_eq!(
+            text.matches("•••• (12 chars)").count(),
+            2,
+            "one header per secret:\n{text}"
+        );
+        assert_eq!(
+            text.matches("Generic (by name)").count(),
+            2,
+            "summary row and one section:\n{text}"
+        );
     }
 
     #[test]
@@ -1719,11 +1917,20 @@ mod tests {
             let dir = TempDir::new("ids");
             dir.write(".env", &format!("A_TOKEN={first}\nB_TOKEN={second}\n"));
             let scan = scan(&files_under(&dir.0));
-            scan.findings.iter().map(|f| (f.name.clone().unwrap(), f.secret_id)).collect::<Vec<_>>()
+            scan.findings
+                .iter()
+                .map(|f| (f.name.clone().unwrap(), f.secret_id))
+                .collect::<Vec<_>>()
         };
-        let (low, high) = (format!("aaaa{}", random(ALNUM, 28, 1)), format!("zzzz{}", random(ALNUM, 28, 2)));
+        let (low, high) = (
+            format!("aaaa{}", random(ALNUM, 28, 1)),
+            format!("zzzz{}", random(ALNUM, 28, 2)),
+        );
         assert_eq!(number(&low, &high), number(&high, &low));
-        assert_eq!(number(&low, &high), [("A_TOKEN".to_string(), 1), ("B_TOKEN".to_string(), 2)]);
+        assert_eq!(
+            number(&low, &high),
+            [("A_TOKEN".to_string(), 1), ("B_TOKEN".to_string(), 2)]
+        );
     }
 
     #[test]
@@ -1732,12 +1939,20 @@ mod tests {
         let key = anthropic_key(1);
 
         let mut utf16 = vec![0xFF, 0xFE];
-        utf16.extend(format!("# note\r\nANTHROPIC_API_KEY={key}\r\n").encode_utf16().flat_map(u16::to_le_bytes));
+        utf16.extend(
+            format!("# note\r\nANTHROPIC_API_KEY={key}\r\n")
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
         let utf16_path = dir.0.join("utf16.env");
         std::fs::write(&utf16_path, utf16).unwrap();
 
         let mut utf16_be = vec![0xFE, 0xFF];
-        utf16_be.extend(format!("OTHER={}\n", anthropic_key(2)).encode_utf16().flat_map(u16::to_be_bytes));
+        utf16_be.extend(
+            format!("OTHER={}\n", anthropic_key(2))
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes),
+        );
         let utf16_be_path = dir.0.join("utf16be.env");
         std::fs::write(&utf16_be_path, utf16_be).unwrap();
 
@@ -1745,19 +1960,38 @@ mod tests {
         std::fs::write(&binary, [b'K', 0, 1, 2, b'=', 0]).unwrap();
         // UTF-16 without a byte order mark cannot be told from binary data.
         let no_bom = dir.0.join("nobom.env");
-        std::fs::write(&no_bom, format!("K={key}").encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>())
-            .unwrap();
+        std::fs::write(
+            &no_bom,
+            format!("K={key}")
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<u8>>(),
+        )
+        .unwrap();
         let large = dir.0.join("large.env");
-        std::fs::File::create(&large).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
         let missing = dir.0.join("missing.env");
 
         let scan = scan(&[utf16_path, utf16_be_path, binary, no_bom, large, missing]);
         assert_eq!(scan.files_scanned, 2);
-        assert_eq!(scan.skipped, SkippedFiles { too_large: 1, binary: 2, unreadable: 1 });
+        assert_eq!(
+            scan.skipped,
+            SkippedFiles {
+                too_large: 1,
+                binary: 2,
+                unreadable: 1
+            }
+        );
         assert_eq!(scan.files_skipped, 4);
         assert_eq!(scan.findings.len(), 2);
         let found = scan.findings.iter().find(|f| f.path.ends_with("utf16.env")).unwrap();
-        assert_eq!((found.rule, found.line, found.name.as_deref()), ("anthropic", 2, Some("ANTHROPIC_API_KEY")));
+        assert_eq!(
+            (found.rule, found.line, found.name.as_deref()),
+            ("anthropic", 2, Some("ANTHROPIC_API_KEY"))
+        );
 
         let report = SecretsReport::new("2026-01-01T00:00:00+00:00".to_string(), scan);
         let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
@@ -1765,7 +1999,10 @@ mod tests {
         assert_eq!(json["skipped"]["too_large"], 1);
         assert_eq!(json["skipped"]["binary"], 2);
         let text = report.to_text();
-        assert!(text.contains("4 files skipped, not scanned: 1 over 8 MB, 2 binary or not text, 1 unreadable"), "{text}");
+        assert!(
+            text.contains("4 files skipped, not scanned: 1 over 8 MB, 2 binary or not text, 1 unreadable"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1774,7 +2011,10 @@ mod tests {
         let binary = dir.0.join("binary.env");
         std::fs::write(&binary, [0u8, 1, 2]).unwrap();
         let text = SecretsReport::new("2026-01-01T00:00:00+00:00".to_string(), scan(&[binary])).to_text();
-        assert!(text.contains("1 files skipped, not scanned: 1 binary or not text"), "{text}");
+        assert!(
+            text.contains("1 files skipped, not scanned: 1 binary or not text"),
+            "{text}"
+        );
         assert!(text.contains("No secrets found."));
 
         let clean = dir.write("clean.env", "DEBUG=true\n");
@@ -1795,14 +2035,32 @@ mod tests {
     #[test]
     fn url_password_may_contain_at_and_slash() {
         let cases = [
-            ("DATABASE_URL=postgres://app:Zq9@K2m!x7@db.prod.internal:5432/app", "Zq9@K2m!x7"),
-            ("DATABASE_URL=postgres://app:Zq9/K2mx7@db.prod.internal/app", "Zq9/K2mx7"),
-            ("DATABASE_URL=postgres://app:Zq9/K2@mx7@db.prod.internal:5432/app?sslmode=require", "Zq9/K2@mx7"),
-            ("DATABASE_URL=postgres://app:Zq9%40K2%2Fx7@db.prod.internal/app", "Zq9@K2/x7"),
-            ("DATABASE_URL=postgres://app:Zq9@K2m/x7@db.prod.internal/app", "Zq9@K2m/x7"),
+            (
+                "DATABASE_URL=postgres://app:Zq9@K2m!x7@db.prod.internal:5432/app",
+                "Zq9@K2m!x7",
+            ),
+            (
+                "DATABASE_URL=postgres://app:Zq9/K2mx7@db.prod.internal/app",
+                "Zq9/K2mx7",
+            ),
+            (
+                "DATABASE_URL=postgres://app:Zq9/K2@mx7@db.prod.internal:5432/app?sslmode=require",
+                "Zq9/K2@mx7",
+            ),
+            (
+                "DATABASE_URL=postgres://app:Zq9%40K2%2Fx7@db.prod.internal/app",
+                "Zq9@K2/x7",
+            ),
+            (
+                "DATABASE_URL=postgres://app:Zq9@K2m/x7@db.prod.internal/app",
+                "Zq9@K2m/x7",
+            ),
             ("REDIS_URL=redis://:Zq9K2mx7Lw@cache.prod.internal:6379/0", "Zq9K2mx7Lw"),
             ("AMQP=\"amqps://svc:Zq9K2mx7Lw@[2001:db8::1]:5671/vhost\"", "Zq9K2mx7Lw"),
-            ("NPM=https://ci:Zq9K2mx7Lw@registry.corp.io/path/@scope/pkg", "Zq9K2mx7Lw"),
+            (
+                "NPM=https://ci:Zq9K2mx7Lw@registry.corp.io/path/@scope/pkg",
+                "Zq9K2mx7Lw",
+            ),
         ];
         for (line, password) in cases {
             assert_eq!(url_secrets(line), [password], "{line}");
@@ -1824,7 +2082,11 @@ mod tests {
             "URL=https://user:<password>@db.prod.internal/app",
             "URL=https://user:hunter2Zq9@example.com/docs",
         ] {
-            assert!(rules_hit(".env", &format!("{line}\n")).is_empty(), "{line}: {:?}", rules_hit(".env", line));
+            assert!(
+                rules_hit(".env", &format!("{line}\n")).is_empty(),
+                "{line}: {:?}",
+                rules_hit(".env", line)
+            );
         }
     }
 
@@ -1843,9 +2105,18 @@ mod tests {
         }
         // The same weak password on a real host is a finding, and so is a
         // real-looking password on a local one.
-        assert_eq!(url_secrets("DATABASE_URL=postgres://postgres:postgres@db.prod.internal/app"), ["postgres"]);
+        assert_eq!(
+            url_secrets("DATABASE_URL=postgres://postgres:postgres@db.prod.internal/app"),
+            ["postgres"]
+        );
         assert_eq!(url_secrets("DATABASE_URL=postgres://app:app12@10.0.0.5/app"), ["app12"]);
-        assert_eq!(url_secrets("DATABASE_URL=postgres://postgres:Zq9K2mx7Lw@localhost/app"), ["Zq9K2mx7Lw"]);
-        assert_eq!(url_secrets("DATABASE_URL=postgres://app:Zq9K2mx7Lw@db/app"), ["Zq9K2mx7Lw"]);
+        assert_eq!(
+            url_secrets("DATABASE_URL=postgres://postgres:Zq9K2mx7Lw@localhost/app"),
+            ["Zq9K2mx7Lw"]
+        );
+        assert_eq!(
+            url_secrets("DATABASE_URL=postgres://app:Zq9K2mx7Lw@db/app"),
+            ["Zq9K2mx7Lw"]
+        );
     }
 }

@@ -2,7 +2,7 @@
 
 use super::{
     Check, FILE_SHARING, Fix, Listener, Outcome, Pref, SCREEN_SHARING, SSHD, Severity, daemon_enabled, listeners,
-    netstat, read_pref, unrecognised,
+    netstat, own_listeners, read_pref, unrecognised,
 };
 use crate::runner::CommandRunner;
 
@@ -61,10 +61,7 @@ fn firewall_enabled(output: &str) -> Option<bool> {
     let output = output.to_lowercase();
     if output.contains("state = 0") || output.contains("firewall is disabled") {
         Some(false)
-    } else if output.contains("state = 1")
-        || output.contains("state = 2")
-        || output.contains("firewall is enabled")
-    {
+    } else if output.contains("state = 1") || output.contains("state = 2") || output.contains("firewall is enabled") {
         Some(true)
     } else {
         None
@@ -149,7 +146,7 @@ impl Check for Ssh {
         Severity::Medium
     }
     fn cis(&self) -> Option<&'static str> {
-        Some("2.3.3")
+        Some("2.3.3.4")
     }
     // No suggested command: `sudo systemsetup -f -setremotelogin off` only
     // works when the terminal has Full Disk Access (macOS 13 and later), so
@@ -170,13 +167,20 @@ impl Check for Ssh {
                 ),
                 Exposure::Closed => Outcome::pass("Port 22 is not listening."),
             },
-            // No usable socket list: ask launchd whether the service is on.
+            // No usable socket list. A server of the user's own shows up in
+            // `lsof`; for the system service, ask launchd whether it is on.
+            Err(_) if exposure(&own_listeners(runner), 22) == Exposure::Network => Outcome::warn(
+                "A process of this user is listening on port 22 (an SSH server other than Remote Login).",
+                "Stop that server if you don't need it, or bind it to 127.0.0.1.",
+            ),
             Err(err) => match daemon_enabled(runner, &SSHD) {
                 Ok(true) => Outcome::warn(
                     "Remote Login is switched on in launchd (the socket list was unavailable).",
                     "If you don't need it, turn off Remote Login in System Settings > General > Sharing.",
                 ),
-                Ok(false) => Outcome::pass("Remote Login is switched off in launchd (the socket list was unavailable)."),
+                Ok(false) => {
+                    Outcome::pass("Remote Login is switched off in launchd (the socket list was unavailable).")
+                }
                 Err(launchd) => Outcome::unknown(format!("{err} {launchd}")),
             },
         }
@@ -256,8 +260,17 @@ impl Check for Sharing {
             }
             // No usable socket list: ask launchd which services are on.
             Err(err) => {
-                let services = [("Screen Sharing", &SCREEN_SHARING), ("File Sharing (SMB)", &FILE_SHARING)];
-                let mut enabled = Vec::new();
+                let services = [
+                    ("Screen Sharing", &SCREEN_SHARING),
+                    ("File Sharing (SMB)", &FILE_SHARING),
+                ];
+                // Servers the user runs themselves are visible to `lsof`.
+                let own = own_listeners(runner);
+                let mut enabled: Vec<&str> = SHARING_PORTS
+                    .iter()
+                    .filter(|(port, _)| exposure(&own, *port) == Exposure::Network)
+                    .map(|(_, name)| *name)
+                    .collect();
                 for (name, daemon) in services {
                     match daemon_enabled(runner, daemon) {
                         Ok(true) => enabled.push(name),
@@ -271,7 +284,7 @@ impl Check for Sharing {
                     )
                 } else {
                     Outcome::warn(
-                        format!("Switched on in launchd: {} (the socket list was unavailable).", enabled.join(", ")),
+                        format!("Switched on: {} (the socket list was unavailable).", enabled.join(", ")),
                         "Turn off the services you don't use (Screen Sharing, File Sharing, Remote Management) \
                          in System Settings > General > Sharing.",
                     )
@@ -345,7 +358,10 @@ mod tests {
         let outcome = Ssh.run(&on);
         assert_eq!(outcome.status, Status::Warn, "{}", outcome.detail);
 
-        let off = silent().ok(OVERRIDES, "disabled services = {\n\t\"com.openssh.sshd\" => disabled\n}");
+        let off = silent().ok(
+            OVERRIDES,
+            "disabled services = {\n\t\"com.openssh.sshd\" => disabled\n}",
+        );
         assert_eq!(Ssh.run(&off).status, Status::Pass);
 
         // No override: the service's own plist decides.
@@ -362,16 +378,52 @@ mod tests {
     }
 
     #[test]
+    fn own_servers_are_found_with_lsof_when_netstat_is_silent() {
+        const LSOF: &str = "lsof -nP -iTCP -sTCP:LISTEN";
+        let header = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+        let off = "disabled services = {\n\t\"com.openssh.sshd\" => disabled\n\t\"com.apple.screensharing\" => disabled\n\t\"com.apple.smbd\" => disabled\n}";
+        let base = || MockRunner::new().ok(NETSTAT, "").ok(OVERRIDES, off);
+
+        let exposed = format!(
+            "{header}sshd 812 alice 7u IPv4 0x1 0t0 TCP *:22 (LISTEN)\nvnc 9 alice 5u IPv6 0x2 0t0 TCP [::]:5900 (LISTEN)\n"
+        );
+        assert_eq!(Ssh.run(&base().ok(LSOF, &exposed)).status, Status::Warn);
+        let sharing = Sharing.run(&base().ok(LSOF, &exposed));
+        assert_eq!(sharing.status, Status::Warn);
+        assert!(sharing.detail.contains("5900"), "{}", sharing.detail);
+
+        // Loopback-only servers and other ports change nothing.
+        let local = format!(
+            "{header}sshd 812 alice 7u IPv4 0x1 0t0 TCP 127.0.0.1:22 (LISTEN)\nsshd 812 alice 8u IPv6 0x1 0t0 TCP [::1]:22 (LISTEN)\nnode 5 alice 9u IPv4 0x3 0t0 TCP *:3000 (LISTEN)\n"
+        );
+        assert_eq!(Ssh.run(&base().ok(LSOF, &local)).status, Status::Pass);
+        assert_eq!(Sharing.run(&base().ok(LSOF, &local)).status, Status::Pass);
+        // No lsof at all: launchd alone decides.
+        assert_eq!(Ssh.run(&base()).status, Status::Pass);
+    }
+
+    #[test]
     fn sharing_falls_back_to_launchd() {
         let silent = || MockRunner::new().ok(NETSTAT, "");
         let state = |screen: &str, files: &str| {
-            format!("disabled services = {{\n\t\"com.apple.screensharing\" => {screen}\n\t\"com.apple.smbd\" => {files}\n}}")
+            format!(
+                "disabled services = {{\n\t\"com.apple.screensharing\" => {screen}\n\t\"com.apple.smbd\" => {files}\n}}"
+            )
         };
-        assert_eq!(Sharing.run(&silent().ok(OVERRIDES, &state("disabled", "disabled"))).status, Status::Pass);
+        assert_eq!(
+            Sharing
+                .run(&silent().ok(OVERRIDES, &state("disabled", "disabled")))
+                .status,
+            Status::Pass
+        );
 
         let outcome = Sharing.run(&silent().ok(OVERRIDES, &state("disabled", "enabled")));
         assert_eq!(outcome.status, Status::Warn);
-        assert!(outcome.detail.contains("File Sharing") && !outcome.detail.contains("Screen Sharing"), "{}", outcome.detail);
+        assert!(
+            outcome.detail.contains("File Sharing") && !outcome.detail.contains("Screen Sharing"),
+            "{}",
+            outcome.detail
+        );
 
         assert_eq!(Sharing.run(&silent()).status, Status::Unknown);
     }

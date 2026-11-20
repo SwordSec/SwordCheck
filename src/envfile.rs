@@ -54,9 +54,15 @@ mod tests {
     fn values_are_read_in_the_usual_env_spellings() {
         let text = "# comment\nOTHER=1\nNVD_API_KEY=abc-123\n";
         assert_eq!(parse(text, "NVD_API_KEY").as_deref(), Some("abc-123"));
-        assert_eq!(parse("export NVD_API_KEY=\"abc 123\" # mine", "NVD_API_KEY").as_deref(), Some("abc 123"));
+        assert_eq!(
+            parse("export NVD_API_KEY=\"abc 123\" # mine", "NVD_API_KEY").as_deref(),
+            Some("abc 123")
+        );
         assert_eq!(parse("NVD_API_KEY='abc'", "NVD_API_KEY").as_deref(), Some("abc"));
-        assert_eq!(parse("  NVD_API_KEY = abc # note", "NVD_API_KEY").as_deref(), Some("abc"));
+        assert_eq!(
+            parse("  NVD_API_KEY = abc # note", "NVD_API_KEY").as_deref(),
+            Some("abc")
+        );
     }
 
     #[test]
@@ -64,7 +70,11 @@ mod tests {
         assert_eq!(parse("NVD_API_KEY=", "NVD_API_KEY"), None);
         assert_eq!(parse("NVD_API_KEY=\"\"", "NVD_API_KEY"), None);
         assert_eq!(parse("# NVD_API_KEY=abc", "NVD_API_KEY"), None);
-        assert_eq!(parse("MY_NVD_API_KEY=abc", "NVD_API_KEY"), None, "the whole name must match");
+        assert_eq!(
+            parse("MY_NVD_API_KEY=abc", "NVD_API_KEY"),
+            None,
+            "the whole name must match"
+        );
         assert_eq!(parse("", "NVD_API_KEY"), None);
     }
 }

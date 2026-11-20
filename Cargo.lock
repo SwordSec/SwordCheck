@@ -1523,6 +1523,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "signal-hook",
  "toml",
 ]
 

@@ -28,7 +28,11 @@ impl Package {
         if name.is_empty() || version.is_empty() {
             return None;
         }
-        Some(Self { ecosystem, name: name.to_string(), version: version.to_string() })
+        Some(Self {
+            ecosystem,
+            name: name.to_string(),
+            version: version.to_string(),
+        })
     }
 }
 
@@ -51,7 +55,10 @@ pub fn parse_file(path: &Path) -> Option<Lockfile> {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
-    Some(Lockfile { path: path.to_path_buf(), packages: parser(&text).into_iter().collect() })
+    Some(Lockfile {
+        path: path.to_path_buf(),
+        packages: parser(&text).into_iter().collect(),
+    })
 }
 
 /// Picks the parser for a file name. Function pointers (`fn(&str) -> …`) let
@@ -90,9 +97,7 @@ fn cargo_lock(text: &str) -> Vec<Package> {
         return Vec::new();
     };
     toml_packages(&lock)
-        .filter(|package| {
-            package.get("source").and_then(toml::Value::as_str) == Some(CRATES_IO)
-        })
+        .filter(|package| package.get("source").and_then(toml::Value::as_str) == Some(CRATES_IO))
         .filter_map(|package| toml_package("crates.io", package))
         .collect()
 }
@@ -107,7 +112,11 @@ fn toml_packages(lock: &toml::Table) -> impl Iterator<Item = &toml::Table> {
 }
 
 fn toml_package(ecosystem: &'static str, package: &toml::Table) -> Option<Package> {
-    Package::new(ecosystem, package.get("name")?.as_str()?, package.get("version")?.as_str()?)
+    Package::new(
+        ecosystem,
+        package.get("name")?.as_str()?,
+        package.get("version")?.as_str()?,
+    )
 }
 
 // ---- JavaScript ----
@@ -240,12 +249,19 @@ impl YarnEntry {
         // protocol (`workspace:`, `patch:`, `link:`, `portal:`, `file:`, git…).
         if let Some(resolution) = &self.resolution {
             let (name, reference) = split_spec(resolution)?;
-            return reference.starts_with("npm:").then(|| npm_package(name, version)).flatten();
+            return reference
+                .starts_with("npm:")
+                .then(|| npm_package(name, version))
+                .flatten();
         }
 
         // Classic: the header spec and the download URL are all there is.
         let (name, range) = split_spec(&self.spec)?;
-        if self.resolved.as_deref().is_some_and(|resolved| !is_registry_tarball(resolved)) {
+        if self
+            .resolved
+            .as_deref()
+            .is_some_and(|resolved| !is_registry_tarball(resolved))
+        {
             return None;
         }
         let name = match range.strip_prefix("npm:") {
@@ -279,9 +295,17 @@ fn yarn_lock(text: &str) -> Vec<Package> {
             // Header: `"a@^1", "a@^2":` (classic) or `"a@npm:^1, a@npm:^2":`
             // (Berry) — every spec names the same package.
             found.extend(current.take().and_then(|entry| entry.package()));
-            let first = line.trim_end().trim_end_matches(':').split(',').next().unwrap_or_default();
+            let first = line
+                .trim_end()
+                .trim_end_matches(':')
+                .split(',')
+                .next()
+                .unwrap_or_default();
             let spec = first.trim().trim_matches('"').to_string();
-            current = Some(YarnEntry { spec, ..YarnEntry::default() });
+            current = Some(YarnEntry {
+                spec,
+                ..YarnEntry::default()
+            });
             continue;
         }
         // Entry fields sit exactly two spaces deep; deeper lines are the
@@ -293,7 +317,12 @@ fn yarn_lock(text: &str) -> Vec<Package> {
             continue;
         };
         let (key, value) = field.split_once([' ', ':']).unwrap_or((field, ""));
-        let value = value.trim().trim_start_matches(':').trim().trim_matches('"').to_string();
+        let value = value
+            .trim()
+            .trim_start_matches(':')
+            .trim()
+            .trim_matches('"')
+            .to_string();
         match key {
             "version" => entry.version = Some(value),
             "resolution" => entry.resolution = Some(value),
@@ -321,7 +350,10 @@ fn pnpm_lock(text: &str) -> Vec<Package> {
             continue;
         }
         // Package keys sit exactly two spaces deep.
-        let Some(key) = line.strip_prefix("  ").filter(|rest| in_packages && !rest.starts_with(' ')) else {
+        let Some(key) = line
+            .strip_prefix("  ")
+            .filter(|rest| in_packages && !rest.starts_with(' '))
+        else {
             continue;
         };
         let key = key.trim_end().trim_end_matches(':').trim_matches(['\'', '"']);
@@ -360,15 +392,22 @@ fn pnpm_key(key: &str) -> Option<Package> {
 /// `-`, `_` and `.` replaced by one `-`. `Flask_SQLAlchemy` and
 /// `flask-sqlalchemy` are the same project and must be one entry.
 fn pypi_name(name: &str) -> String {
-    let parts: Vec<String> =
-        name.trim().split(['-', '_', '.']).filter(|part| !part.is_empty()).map(str::to_ascii_lowercase).collect();
+    let parts: Vec<String> = name
+        .trim()
+        .split(['-', '_', '.'])
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
     parts.join("-")
 }
 
 fn pypi_package(name: &str, version: &str) -> Option<Package> {
     let version = version.trim();
     // A pinned version (PEP 440) has no wildcard, comparison or URL characters.
-    if !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '!' | '+' | '-' | '_')) {
+    if !version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '!' | '+' | '-' | '_'))
+    {
         return None;
     }
     Package::new("PyPI", &pypi_name(name), version)
@@ -400,7 +439,10 @@ fn python_index_source(package: &toml::Table) -> bool {
             // uv: `{ registry = "https://…" }`, otherwise `git`, `path`,
             // `directory`, `editable`, `virtual` or `url`. A registry that
             // is a local directory of wheels is not an index either.
-            None => source.get("registry").and_then(toml::Value::as_str).is_some_and(|url| url.starts_with("http")),
+            None => source
+                .get("registry")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|url| url.starts_with("http")),
         },
         Some(_) => false,
     }
@@ -456,7 +498,10 @@ fn requirement(line: &str) -> Option<Package> {
     };
     // Anything else before the `==` means it was not the only specifier
     // (`foo>=1,==1.5`) or not a name at all (`foo @ https://…`).
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
         return None;
     }
     // `pypi_package` rejects wildcards (`==1.*`) and further clauses (`==1.0,!=1.1`).
@@ -474,7 +519,10 @@ fn pipfile_lock(text: &str) -> Vec<Package> {
         .flatten()
         .filter_map(|(name, entry)| {
             // Git, local and direct-URL dependencies are not index packages.
-            if ["git", "hg", "svn", "path", "file"].iter().any(|key| entry.get(key).is_some()) {
+            if ["git", "hg", "svn", "path", "file"]
+                .iter()
+                .any(|key| entry.get(key).is_some())
+            {
                 return None;
             }
             let version = entry.get("version")?.as_str()?.strip_prefix("==")?;
@@ -580,7 +628,9 @@ fn go_mod(text: &str) -> Vec<Package> {
 
     // Module paths and versions may be quoted.
     fn words(text: &str) -> Vec<String> {
-        text.split_whitespace().map(|word| word.trim_matches(['"', '`']).to_string()).collect()
+        text.split_whitespace()
+            .map(|word| word.trim_matches(['"', '`']).to_string())
+            .collect()
     }
 
     for line in text.lines() {
@@ -629,7 +679,11 @@ fn go_mod(text: &str) -> Vec<Package> {
                     [path, version] if !path.starts_with(['.', '/']) => Some((path.clone(), version.clone())),
                     _ => None,
                 };
-                replaces.push(GoReplace { module: module.clone(), version: old.get(1).cloned(), target });
+                replaces.push(GoReplace {
+                    module: module.clone(),
+                    version: old.get(1).cloned(),
+                    target,
+                });
             }
             GoDirective::Other => {}
         }
@@ -646,7 +700,9 @@ fn go_mod(text: &str) -> Vec<Package> {
             let (module, version) = match replace {
                 // Replaced by a local directory: not a published module.
                 Some(GoReplace { target: None, .. }) => return None,
-                Some(GoReplace { target: Some(target), .. }) => target.clone(),
+                Some(GoReplace {
+                    target: Some(target), ..
+                }) => target.clone(),
                 None => (module, version),
             };
             // OSV stores Go versions without the leading `v`.
@@ -660,8 +716,22 @@ fn go_mod(text: &str) -> Vec<Package> {
 /// Directories that are never entered: dependencies and build output. Their
 /// lockfiles belong to other people's packages, not to the user's projects.
 const SKIP_DIRS: [&str; 16] = [
-    "node_modules", "target", "vendor", "Pods", "venv", "env", "__pycache__", "dist", "build",
-    "DerivedData", "site-packages", "bower_components", "Carthage", "testdata", "fixtures", "tmp",
+    "node_modules",
+    "target",
+    "vendor",
+    "Pods",
+    "venv",
+    "env",
+    "__pycache__",
+    "dist",
+    "build",
+    "DerivedData",
+    "site-packages",
+    "bower_components",
+    "Carthage",
+    "testdata",
+    "fixtures",
+    "tmp",
 ];
 
 /// Finds lockfiles under the home directory, skipping large folders that
@@ -724,8 +794,10 @@ mod tests {
     use super::*;
 
     fn names(packages: &[Package]) -> Vec<String> {
-        let mut names: Vec<String> =
-            packages.iter().map(|p| format!("{}:{}@{}", p.ecosystem, p.name, p.version)).collect();
+        let mut names: Vec<String> = packages
+            .iter()
+            .map(|p| format!("{}:{}@{}", p.ecosystem, p.name, p.version))
+            .collect();
         names.sort();
         names
     }
@@ -867,7 +939,10 @@ mod tests {
     #[test]
     fn yarn_lock_classic_and_berry() {
         let classic = "# yarn lockfile v1\n\n\"@babel/core@^7.0.0\", \"@babel/core@^7.1.0\":\n  version \"7.24.0\"\n  resolved \"https://registry.yarnpkg.com/@babel/core/-/core-7.24.0.tgz#abc\"\n\nlodash@^4.17.0:\n  version \"4.17.21\"\n";
-        assert_eq!(names(&yarn_lock(classic)), ["npm:@babel/core@7.24.0", "npm:lodash@4.17.21"]);
+        assert_eq!(
+            names(&yarn_lock(classic)),
+            ["npm:@babel/core@7.24.0", "npm:lodash@4.17.21"]
+        );
 
         let berry = "__metadata:\n  version: 8\n\n\"lodash@npm:^4.17.0\":\n  version: 4.17.21\n  resolution: \"lodash@npm:4.17.21\"\n";
         assert_eq!(names(&yarn_lock(berry)), ["npm:lodash@4.17.21"]);
@@ -944,7 +1019,12 @@ mod tests {
         let text = "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies: {}\n\npackages:\n\n  lodash@4.17.21:\n    resolution: {integrity: x}\n\n  '@scope/pkg@2.0.0':\n    resolution: {integrity: x}\n\n  /old-style/1.2.3:\n    dev: false\n\n  /mid-style@3.0.0(react@18.2.0):\n    dev: false\n\nsnapshots:\n\n  ignored@9.9.9: {}\n";
         assert_eq!(
             names(&pnpm_lock(text)),
-            ["npm:@scope/pkg@2.0.0", "npm:lodash@4.17.21", "npm:mid-style@3.0.0", "npm:old-style@1.2.3"]
+            [
+                "npm:@scope/pkg@2.0.0",
+                "npm:lodash@4.17.21",
+                "npm:mid-style@3.0.0",
+                "npm:old-style@1.2.3"
+            ]
         );
     }
 
@@ -955,14 +1035,26 @@ mod tests {
         assert_eq!(key("/foo/1.2.3").as_deref(), Some("foo@1.2.3"));
         assert_eq!(key("/@scope/foo/1.2.3").as_deref(), Some("@scope/foo@1.2.3"));
         assert_eq!(key("/foo/1.2.3_react@17.0.2").as_deref(), Some("foo@1.2.3"));
-        assert_eq!(key("/foo/1.2.3_react-dom@17.0.2+react@17.0.2").as_deref(), Some("foo@1.2.3"));
+        assert_eq!(
+            key("/foo/1.2.3_react-dom@17.0.2+react@17.0.2").as_deref(),
+            Some("foo@1.2.3")
+        );
         assert_eq!(key("/foo/1.2.3_a1b2c3d4e5").as_deref(), Some("foo@1.2.3"));
-        assert_eq!(key("/@emotion/styled/11.3.0_@emotion+react@11.4.0").as_deref(), Some("@emotion/styled@11.3.0"));
-        assert_eq!(key("/foo/1.0.0-beta.1_react@17.0.2").as_deref(), Some("foo@1.0.0-beta.1"));
+        assert_eq!(
+            key("/@emotion/styled/11.3.0_@emotion+react@11.4.0").as_deref(),
+            Some("@emotion/styled@11.3.0")
+        );
+        assert_eq!(
+            key("/foo/1.0.0-beta.1_react@17.0.2").as_deref(),
+            Some("foo@1.0.0-beta.1")
+        );
         // v6: `/name@version`, peers in parentheses.
         assert_eq!(key("/foo@1.2.3").as_deref(), Some("foo@1.2.3"));
         assert_eq!(key("/foo@1.2.3(react@18.0.0)").as_deref(), Some("foo@1.2.3"));
-        assert_eq!(key("/@scope/foo@1.2.3(@types/react@18.0.0)(react@18.0.0)").as_deref(), Some("@scope/foo@1.2.3"));
+        assert_eq!(
+            key("/@scope/foo@1.2.3(@types/react@18.0.0)(react@18.0.0)").as_deref(),
+            Some("@scope/foo@1.2.3")
+        );
         // v9: no leading slash.
         assert_eq!(key("foo@1.2.3").as_deref(), Some("foo@1.2.3"));
         assert_eq!(key("@scope/foo@1.2.3").as_deref(), Some("@scope/foo@1.2.3"));
@@ -989,7 +1081,10 @@ mod tests {
     #[test]
     fn python_lockfiles() {
         let requirements = "# comment\nrequests[socks]==2.31.0 ; python_version >= '3.8' \\\n    --hash=sha256:abc\nflask>=2.0\n-r other.txt\nDjango==4.2.1  # pinned\n";
-        assert_eq!(names(&requirements_txt(requirements)), ["PyPI:django@4.2.1", "PyPI:requests@2.31.0"]);
+        assert_eq!(
+            names(&requirements_txt(requirements)),
+            ["PyPI:django@4.2.1", "PyPI:requests@2.31.0"]
+        );
 
         let uv = r#"
             [[package]]
@@ -1005,7 +1100,10 @@ mod tests {
         assert_eq!(names(&python_toml_lock(uv)), ["PyPI:idna@3.6"]);
 
         let pipfile = r#"{"default": {"jinja2": {"version": "==3.1.2"}}, "develop": {"pytest": {"version": "==8.0.0"}, "local": {"path": "."}}}"#;
-        assert_eq!(names(&pipfile_lock(pipfile)), ["PyPI:jinja2@3.1.2", "PyPI:pytest@8.0.0"]);
+        assert_eq!(
+            names(&pipfile_lock(pipfile)),
+            ["PyPI:jinja2@3.1.2", "PyPI:pytest@8.0.0"]
+        );
     }
 
     #[test]
@@ -1061,16 +1159,22 @@ mod tests {
         assert_eq!(pypi_name("requests"), "requests");
 
         let expected = ["PyPI:flask-sqlalchemy@3.1.1", "PyPI:zope-interface@6.1"];
-        assert_eq!(names(&requirements_txt("Flask_SQLAlchemy==3.1.1\nzope.interface==6.1\n")), expected);
+        assert_eq!(
+            names(&requirements_txt("Flask_SQLAlchemy==3.1.1\nzope.interface==6.1\n")),
+            expected
+        );
         let toml = "[[package]]\nname = \"Flask-SQLAlchemy\"\nversion = \"3.1.1\"\n\n[[package]]\nname = \"zope.interface\"\nversion = \"6.1\"\n";
         assert_eq!(names(&python_toml_lock(toml)), expected);
-        let pipfile = r#"{"default": {"flask_sqlalchemy": {"version": "==3.1.1"}, "Zope.Interface": {"version": "==6.1"}}}"#;
+        let pipfile =
+            r#"{"default": {"flask_sqlalchemy": {"version": "==3.1.1"}, "Zope.Interface": {"version": "==6.1"}}}"#;
         assert_eq!(names(&pipfile_lock(pipfile)), expected);
 
         // The same project from two lockfiles is one entry.
         let mut all = BTreeSet::new();
         all.extend(requirements_txt("Flask_SQLAlchemy==3.1.1\n"));
-        all.extend(python_toml_lock("[[package]]\nname = \"flask-sqlalchemy\"\nversion = \"3.1.1\"\n"));
+        all.extend(python_toml_lock(
+            "[[package]]\nname = \"flask-sqlalchemy\"\nversion = \"3.1.1\"\n",
+        ));
         assert_eq!(all.len(), 1);
     }
 
@@ -1125,7 +1229,10 @@ mod tests {
             type = "url"
             url = "https://example.com/from_url-0.1.0.tar.gz"
         "#;
-        assert_eq!(names(&python_toml_lock(text)), ["PyPI:from-mirror@1.0.0", "PyPI:requests@2.31.0"]);
+        assert_eq!(
+            names(&python_toml_lock(text)),
+            ["PyPI:from-mirror@1.0.0", "PyPI:requests@2.31.0"]
+        );
     }
 
     #[test]
@@ -1193,12 +1300,19 @@ mod tests {
         );
 
         let gemfile = "GEM\n  remote: https://rubygems.org/\n  specs:\n    rails (7.0.4)\n      actionpack (= 7.0.4)\n    nokogiri (1.16.0-arm64-darwin)\n\nPLATFORMS\n  ruby\n";
-        assert_eq!(names(&gemfile_lock(gemfile)), ["RubyGems:nokogiri@1.16.0", "RubyGems:rails@7.0.4"]);
+        assert_eq!(
+            names(&gemfile_lock(gemfile)),
+            ["RubyGems:nokogiri@1.16.0", "RubyGems:rails@7.0.4"]
+        );
 
         let go = "module example.com/app\n\ngo 1.22\n\nrequire github.com/a/b v1.2.3\n\nrequire (\n\tgolang.org/x/net v0.17.0 // indirect\n\tgithub.com/c/d v0.0.0-20230101000000-abcdef123456\n)\n";
         assert_eq!(
             names(&go_mod(go)),
-            ["Go:github.com/a/b@1.2.3", "Go:github.com/c/d@0.0.0-20230101000000-abcdef123456", "Go:golang.org/x/net@0.17.0"]
+            [
+                "Go:github.com/a/b@1.2.3",
+                "Go:github.com/c/d@0.0.0-20230101000000-abcdef123456",
+                "Go:golang.org/x/net@0.17.0"
+            ]
         );
     }
 
@@ -1216,7 +1330,10 @@ mod tests {
             "CHECKSUMS\n  rack (3.0.8) sha256=abc\n\n",
             "BUNDLED WITH\n   2.5.6\n",
         );
-        assert_eq!(names(&gemfile_lock(text)), ["RubyGems:rack@3.0.8", "RubyGems:rails@7.0.4"]);
+        assert_eq!(
+            names(&gemfile_lock(text)),
+            ["RubyGems:rack@3.0.8", "RubyGems:rails@7.0.4"]
+        );
     }
 
     #[test]
@@ -1271,7 +1388,14 @@ mod tests {
 
     #[test]
     fn lockfile_names_are_recognized() {
-        for name in ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "requirements-dev.txt", "go.mod"] {
+        for name in [
+            "Cargo.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "requirements-dev.txt",
+            "go.mod",
+        ] {
             assert!(is_lockfile(name), "{name}");
         }
         for name in ["Cargo.toml", "package.json", "notes.txt", "requirements.in"] {

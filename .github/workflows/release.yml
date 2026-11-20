@@ -1,0 +1,70 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds a universal macOS binary and opens a draft
+# release with it. Publishing the draft is a manual step.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Universal macOS binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag matches Cargo.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir dist
+          lipo -create -output dist/swordcheck \
+            target/aarch64-apple-darwin/release/swordcheck \
+            target/x86_64-apple-darwin/release/swordcheck
+          lipo -info dist/swordcheck
+          dist/swordcheck --version
+
+      # The binary is ad-hoc signed only. Developer ID signing and
+      # notarization need an Apple Developer account and are not set up yet.
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp README.md LICENSE CHANGELOG.md .env.example audit.example.toml dist/
+          archive="swordcheck-$TAG-macos-universal.tar.gz"
+          tar -czf "$archive" -C dist .
+          shasum -a 256 "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --draft --verify-tag --title "SwordCheck $TAG" \
+            --notes "See CHANGELOG.md for what changed. The binary is not notarized: build from source, or allow it once under System Settings > Privacy & Security." \
+            swordcheck-"$TAG"-macos-universal.tar.gz swordcheck-"$TAG"-macos-universal.tar.gz.sha256

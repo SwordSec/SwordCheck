@@ -1,0 +1,2 @@
+# Wider than the default 100: the report and table code reads better unbroken.
+max_width = 120

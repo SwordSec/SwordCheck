@@ -74,8 +74,7 @@ pub fn history_path() -> Option<PathBuf> {
 /// exist; fails if it is corrupt (so we do not overwrite it and lose data).
 pub fn load(path: &Path) -> Result<Vec<RunRecord>, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map_err(|err| format!("could not parse {}: {err}", path.display())),
+        Ok(text) => serde_json::from_str(&text).map_err(|err| format!("could not parse {}: {err}", path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(err) => Err(format!("could not read {}: {err}", path.display())),
     }
@@ -91,8 +90,7 @@ pub fn append(path: &Path, mut records: Vec<RunRecord>, record: RunRecord) -> Re
     }
 
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|err| format!("could not create {}: {err}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
     // Write a sibling file and rename it over the old one: a crash or a
@@ -137,10 +135,7 @@ mod tests {
     fn finds_changed_checks() {
         let before = record(
             50,
-            &[
-                result("firewall", Status::Fail, 20),
-                result("sip", Status::Pass, 20),
-            ],
+            &[result("firewall", Status::Fail, 20), result("sip", Status::Pass, 20)],
         );
         let now = [
             result("firewall", Status::Pass, 20),

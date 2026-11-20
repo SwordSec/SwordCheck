@@ -304,7 +304,10 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
             }
             Err(err) => {
                 incomplete = true;
-                eprintln!("{} OSV query failed: {err}. Only the built-in list was checked.", "Warning:".yellow());
+                eprintln!(
+                    "{} OSV query failed: {err}. Only the built-in list was checked.",
+                    "Warning:".yellow()
+                );
             }
         }
     }
@@ -385,7 +388,9 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
             if !path.exists() {
                 return Err(format!("{} not found.", path.display()));
             }
-            let named_like_one = path.file_name().is_some_and(|name| lockfiles::is_lockfile(&name.to_string_lossy()));
+            let named_like_one = path
+                .file_name()
+                .is_some_and(|name| lockfiles::is_lockfile(&name.to_string_lossy()));
             if path.is_file() && !named_like_one {
                 return Err(format!("{} is not a lockfile this tool can read.", path.display()));
             }
@@ -417,11 +422,7 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
 
     let rendered = match format {
         Format::Json => report.to_json(),
-        _ if cli.quiet => format!(
-            "{} findings, {} known-exploited",
-            report.scan.findings.len(),
-            exploited
-        ),
+        _ if cli.quiet => format!("{} findings, {} known-exploited", report.scan.findings.len(), exploited),
         _ => report.to_text(),
     };
     emit(cli, &rendered)?;
@@ -496,10 +497,7 @@ fn validate_ids(cli: &Cli, config: &Config, checks: &[Box<dyn Check>]) -> Result
 
     for id in referenced {
         if !known.contains(&id) {
-            return Err(format!(
-                "Unknown check id: `{id}`. Valid ids: {}",
-                known.join(", ")
-            ));
+            return Err(format!("Unknown check id: `{id}`. Valid ids: {}", known.join(", ")));
         }
     }
     Ok(())
@@ -547,7 +545,11 @@ fn print_history(records: &[history::RunRecord]) {
     }
     println!(
         "{}",
-        format!("{:<17} {:>5}  {:<5} {:<14} {}", "DATE", "SCORE", "GRADE", "SYSTEM", "ISSUES").bold()
+        format!(
+            "{:<17} {:>5}  {:<5} {:<14} {}",
+            "DATE", "SCORE", "GRADE", "SYSTEM", "ISSUES"
+        )
+        .bold()
     );
     for record in records {
         let count = |status| record.checks.values().filter(|s| **s == status).count();
@@ -587,7 +589,10 @@ mod tests {
 
     #[test]
     fn invalid_combinations_are_rejected() {
-        assert!(parse(&["--fix"]).is_err(), "the tool is read-only: there is no fix mode");
+        assert!(
+            parse(&["--fix"]).is_err(),
+            "the tool is read-only: there is no fix mode"
+        );
         assert!(parse(&["--min-score", "101"]).is_err());
         assert!(parse(&["--unknown"]).is_err());
         assert!(parse(&["--online"]).is_err(), "--online only with --npm or --vulns");
@@ -595,11 +600,17 @@ mod tests {
         assert!(parse(&["--vulns", "--npm"]).is_err());
         assert!(parse(&["--vulns-path", "."]).is_err(), "--vulns-path only with --vulns");
         assert!(parse(&["--npm-path", "."]).is_err());
-        assert!(parse(&["--npm", "--only", "sip"]).is_err(), "audit options do not apply to the scan modes");
+        assert!(
+            parse(&["--npm", "--only", "sip"]).is_err(),
+            "audit options do not apply to the scan modes"
+        );
         assert!(parse(&["--vulns", "--min-score", "80"]).is_err());
         assert!(parse(&["--secrets", "--no-history"]).is_err());
         assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());
-        assert!(parse(&["--secrets-path", "."]).is_err(), "--secrets-path only with --secrets");
+        assert!(
+            parse(&["--secrets-path", "."]).is_err(),
+            "--secrets-path only with --secrets"
+        );
         assert!(parse(&["--secrets", "--npm"]).is_err());
         assert!(parse(&["--secrets", "--json", "--secrets-path", "a"]).is_ok());
     }
