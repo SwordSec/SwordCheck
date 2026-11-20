@@ -61,6 +61,7 @@ const URL_PASSWORD: &str = "url-password";
 const DOCKER_AUTH: &str = "docker-auth";
 const KUBE_CLIENT_KEY: &str = "kube-client-key";
 const NETRC: &str = "netrc";
+const PGPASS: &str = "pgpass";
 
 /// Order matters: a piece of text is claimed by the first rule that matches it.
 const RULES: &[Rule] = &[
@@ -123,6 +124,15 @@ const RULES: &[Rule] = &[
         provider: "netrc password",
         pattern: r"\bpassword\s+(\S{4,})",
         file_hint: Some("netrc"),
+    },
+    // `hostname:port:database:username:password`, one per line; `\:` and `\\`
+    // are escapes, `#` starts a comment. Group 1 is the host, group 2 the user
+    // name, group 3 the password.
+    Rule {
+        id: PGPASS,
+        provider: "pgpass password",
+        pattern: r"(?m)^((?:[^#:\\\r\n]|\\.)(?:[^:\\\r\n]|\\.)*):(?:[^:\\\r\n]|\\.)*:(?:[^:\\\r\n]|\\.)*:((?:[^:\\\r\n]|\\.)*):((?:[^\\\r\n]|\\.)+)\r?$",
+        file_hint: Some("pgpass"),
     },
     rule(
         "jwt",
@@ -294,8 +304,15 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
         if rule.file_hint.is_some_and(|hint| !file_name.contains(hint)) || (template && rule.id == URL_PASSWORD) {
             continue;
         }
-        for captures in regex.captures_iter(text) {
+        let mut from = 0;
+        while let Some(captures) = regex.captures_at(text, from) {
             let whole = captures.get(0).expect("group 0 always exists");
+            // A list of URLs (`a://u:p@h1,a://u:p@h2`) is a single match of the
+            // URL rule; resuming after `user:` lets the next URL be found too.
+            from = match (rule.id, captures.get(2)) {
+                (URL_PASSWORD, Some(rest)) => rest.start(),
+                _ => whole.end(),
+            };
             let (start, end, secret) = match rule.id {
                 PRIVATE_KEY | PGP_KEY => {
                     if rule.id == PRIVATE_KEY && key_is_encrypted(&text[whole.end()..]) {
@@ -320,6 +337,19 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
                         continue;
                     }
                     (rest.start(), rest.start() + len, password)
+                }
+                PGPASS => {
+                    let (Some(host), Some(user), Some(password)) = (captures.get(1), captures.get(2), captures.get(3))
+                    else {
+                        continue;
+                    };
+                    if password.as_str().chars().count() < MIN_URL_PASSWORD_LEN
+                        || is_placeholder(password.as_str())
+                        || is_dev_default(user.as_str(), password.as_str(), host.as_str())
+                    {
+                        continue;
+                    }
+                    (password.start(), password.end(), password.as_str().to_string())
                 }
                 _ => {
                     let value = captures.get(1).unwrap_or(whole);
@@ -759,7 +789,12 @@ fn mask(rule: &str, secret: &str) -> String {
     let chars: Vec<char> = secret.chars().collect();
     let len = chars.len();
     let hidden = format!("•••• ({len} chars)");
-    if len < MIN_REVEAL_LEN || matches!(rule, GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC) {
+    if len < MIN_REVEAL_LEN
+        || matches!(
+            rule,
+            GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC | PGPASS
+        )
+    {
         return hidden;
     }
     let prefix = public_prefix(rule, secret);
@@ -2067,6 +2102,37 @@ mod tests {
         }
         // The encoded and the plain spelling are the same secret.
         assert_eq!(percent_decode("a%40b%2Fc%zz%4"), "a@b/c%zz%4");
+    }
+
+    #[test]
+    fn every_password_in_a_list_of_urls_is_caught() {
+        let first = "postgres://app:Zq9K2mx7Lw@db1.prod.internal:5432/app";
+        let second = "postgres://app:Lp4wR8nTqV@db2.prod.internal/app";
+        for separator in [",", ";"] {
+            let line = format!("DATABASE_URLS={first}{separator}{second}");
+            assert_eq!(url_secrets(&line), ["Zq9K2mx7Lw", "Lp4wR8nTqV"], "{line}");
+        }
+        // A first URL that is not reported does not hide the next one.
+        let line = format!("URLS=postgres://app:Hk7pQ2wZx9@db.example.com/app,{second}");
+        assert_eq!(url_secrets(&line), ["Lp4wR8nTqV"], "{line}");
+    }
+
+    #[test]
+    fn pgpass_passwords_are_caught() {
+        let password = random(ALNUM, 16, 1);
+        let text = format!(
+            "# comment:5432:app:user:{password}\n\
+             db.prod.internal:5432:app:appuser:{password}\r\n\
+             localhost:5432:*:postgres:postgres\n\
+             db2.prod.internal:5432:app:other:a\\:{password}\n"
+        );
+        let found = scan_text(".pgpass", &text);
+        let secrets: Vec<&str> = found.iter().map(|found| found.secret.as_str()).collect();
+        let escaped = format!("a\\:{password}");
+        assert_eq!(secrets, [password.as_str(), escaped.as_str()]);
+        assert!(found.iter().all(|found| found.rule == PGPASS));
+        assert_eq!(mask(PGPASS, &password), "•••• (16 chars)");
+        assert!(rules_hit("notes.txt", &text).is_empty());
     }
 
     #[test]
