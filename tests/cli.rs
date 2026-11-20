@@ -763,3 +763,97 @@ fn a_failed_osv_request_keeps_the_malware_found_before_it() {
         "{err}"
     );
 }
+
+#[test]
+fn an_empty_or_relative_home_never_puts_the_history_in_the_current_folder() {
+    let home = Home::new("relative-home");
+    let work = home.path("project");
+    std::fs::create_dir_all(&work).unwrap();
+    for value in ["", "relative"] {
+        let run = |args: &[&str]| {
+            home.command(args)
+                .env("HOME", value)
+                .env_remove("SWORDCHECK_HOME")
+                .current_dir(&work)
+                .output()
+                .unwrap()
+        };
+        let history = run(&["--history"]);
+        assert_eq!(history.status.code(), Some(2), "HOME={value:?}");
+        assert!(
+            stderr(&history).contains("history directory (HOME is not set to an absolute path)"),
+            "{}",
+            stderr(&history)
+        );
+        let vulns = run(&["--vulns", "--online", "--vulns-path", str(&work)]);
+        assert_eq!(vulns.status.code(), Some(2), "HOME={value:?}");
+        assert!(stderr(&vulns).contains("cache directory (HOME is not set to an absolute path)"));
+        let audit = run(&[]);
+        assert!(matches!(audit.status.code(), Some(0 | 1)), "HOME={value:?}");
+        // (npm, run by the supply-chain check, may still log under $HOME.)
+        let history = work.join(value).join(".swordcheck");
+        assert!(!history.exists(), "{} was created", history.display());
+    }
+}
+
+/// A fake `npm`: `npm root -g` prints `$NPM_ROOT`, or fails when it is empty.
+const ROOT_NPM: &str = r#"#!/bin/sh
+[ "$1 $2" = "root -g" ] || exit 2
+[ -n "$NPM_ROOT" ] && echo "$NPM_ROOT" && exit 0
+echo "npm error code EACCES" >&2
+exit 1
+"#;
+
+#[test]
+fn npm_scan_says_when_npm_cannot_name_its_global_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("npm-root");
+    // A custom prefix is found only through `npm root -g`.
+    home.write(
+        ".npm-packages/lib/node_modules/chalk/package.json",
+        r#"{"name":"chalk","version":"5.6.1"}"#,
+    );
+    let root = home.path(".npm-packages/lib/node_modules");
+    let shim = home.write("shim/npm", ROOT_NPM);
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: &[&str], npm_root: &str| {
+        home.command(args)
+            .env("PATH", format!("{}:/usr/bin:/bin", str(&home.path("shim"))))
+            .env("NPM_ROOT", npm_root)
+            .output()
+            .unwrap()
+    };
+
+    // npm answers: the prefix is scanned and the malicious version found.
+    let found = run(&["--npm", "--json"], str(&root));
+    assert_eq!(found.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert!(report.get("global_dir_problem").is_none());
+
+    // npm fails: no all-clear, the reason is named and the scan is incomplete.
+    let json = run(&["--npm", "--json"], "");
+    assert_eq!(json.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        report["global_dir_problem"],
+        "`npm root -g` failed: npm error code EACCES"
+    );
+    let text = run(&["--npm"], "");
+    assert_eq!(text.status.code(), Some(3));
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains(
+            "npm's own global directory could not be located, so it may not have been scanned: \
+             `npm root -g` failed: npm error code EACCES."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("No known malicious packages found."), "{text}");
+    let quiet = run(&["--npm", "-q"], "");
+    assert_eq!(quiet.status.code(), Some(3));
+    let quiet = String::from_utf8_lossy(&quiet.stdout);
+    assert!(
+        quiet.ends_with("; incomplete: 1 npm global directory not located\n"),
+        "{quiet}"
+    );
+}

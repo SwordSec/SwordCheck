@@ -423,7 +423,12 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             ),
         ),
         (
-            if malware > 0 { Tone::Bad } else { Tone::Good },
+            match (malware, &scan.global_dir_problem) {
+                (1.., _) => Tone::Bad,
+                // npm's own global directory may not have been scanned.
+                (0, Some(_)) => Tone::Warn,
+                (0, None) => Tone::Good,
+            },
             format!(
                 "{malware} malicious · {} suspicious install scripts",
                 scan.suspicious().count() - unread
@@ -433,7 +438,7 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
     if unread > 0 {
         headline.push((
             Tone::Warn,
-            format!("{unread} packages not checked: their package.json is too large to read"),
+            format!("{unread} packages not checked: their package.json is too large or too deeply nested to read"),
         ));
     }
     if let Some(Err(err)) = lookup {
@@ -442,12 +447,12 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             format!("OSV lookup failed, so the scan is incomplete: {err}"),
         ));
     }
-    ResultView::new(
-        Module::Npm,
-        headline,
-        rows,
-        "No malicious or suspicious packages found.",
-    )
+    headline.extend(scan.global_dir_note().map(|note| (Tone::Warn, note)));
+    let empty = match scan.global_dir_problem {
+        Some(_) => "No malicious or suspicious packages in the directories that were scanned.",
+        None => "No malicious or suspicious packages found.",
+    };
+    ResultView::new(Module::Npm, headline, rows, empty)
 }
 
 fn secrets_view(scan: &secrets::Scan) -> ResultView {
@@ -673,8 +678,9 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
         }
         Module::Npm => {
             progress.stage("Looking for node_modules directories");
-            let roots = npm::all_roots(&runner);
+            let (roots, unlocated) = npm::all_roots(&runner);
             let mut scan = npm::scan_with(&roots, progress);
+            scan.global_dir_problem = unlocated;
             let lookup = online.then(|| scan.lookup_osv(progress));
             Outcome::View(npm_view(&scan, lookup))
         }
@@ -688,10 +694,10 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
 
 /// Saves a dashboard audit to the history, like the command line does, and
 /// describes how it compares with the previous one. `path` is the history
-/// file (`history::history_path()`), `None` when HOME is not set.
+/// file (`history::history_path()`), `None` when HOME is not set to an absolute path.
 fn record_audit(path: Option<&Path>, results: &[CheckResult], os_version: &str) -> String {
     let Some(path) = path else {
-        return "history unavailable (HOME is not set)".to_string();
+        return "history unavailable (HOME is not set to an absolute path)".to_string();
     };
     // Like the command line: a run in which nothing could be evaluated has no
     // score worth comparing or saving.
@@ -1648,6 +1654,32 @@ mod tests {
     }
 
     #[test]
+    fn npm_view_is_not_green_when_npm_could_not_name_its_global_directory() {
+        let mut scan = npm::scan(&[]);
+        assert_eq!(npm_view(&scan, None).headline[1].0, Tone::Good);
+        assert_eq!(
+            npm_view(&scan, None).empty,
+            "No malicious or suspicious packages found."
+        );
+        scan.global_dir_problem = Some("`npm root -g` failed: npm error".into());
+        let view = npm_view(&scan, None);
+        assert_eq!(view.headline[1].0, Tone::Warn);
+        assert_eq!(
+            view.headline.last().unwrap(),
+            &(
+                Tone::Warn,
+                "npm's own global directory could not be located, so it may not have been scanned: \
+                 `npm root -g` failed: npm error."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            view.empty,
+            "No malicious or suspicious packages in the directories that were scanned."
+        );
+    }
+
+    #[test]
     fn secrets_view_says_when_git_status_is_unknown() {
         let dir = std::env::temp_dir().join(format!("swordcheck-tui-gitunknown-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1914,7 +1946,7 @@ mod tests {
         assert_eq!(scored, [50, 100]);
         assert_eq!(
             record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26"),
-            "history unavailable (HOME is not set)"
+            "history unavailable (HOME is not set to an absolute path)"
         );
     }
 

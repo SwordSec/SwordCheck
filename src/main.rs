@@ -60,7 +60,7 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  the scan is incomplete: an online lookup failed (--npm / --vulns / --report with --online),\n     a lockfile could not be read (--vulns / --report), or git could not tell whether\n     a file with a secret is tracked (--secrets / --report)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  the scan is incomplete: an online lookup failed (--npm / --vulns / --report with --online),\n     a lockfile could not be read (--vulns / --report), or git could not tell whether\n     a file with a secret is tracked (--secrets / --report),\n     or npm root -g failed (--npm / --report)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
 ,
     // The path options of a scan also narrow that scan inside `--report`.
     group(ArgGroup::new("npm_scope").args(["npm", "report"])),
@@ -221,7 +221,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
     let history_path = history::history_path();
     if cli.history {
-        let path = history_path.ok_or("Could not determine the history directory (HOME is not set).")?;
+        let path =
+            history_path.ok_or("Could not determine the history directory (HOME is not set to an absolute path).")?;
         out(history_table(&history::load(&path)?).trim_end())?;
         return Ok(ExitCode::SUCCESS);
     }
@@ -269,7 +270,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     let format = if cli.json { Format::Json } else { cli.format };
     let report = Report::new(timestamp, os_version, results, records.last());
     emit(&cli, &report.render(format, cli.quiet))?;
-    save_history(history_file, records, &report);
+    save_history(history_file, &report);
 
     Ok(exit_code(&cli, &config, &report))
 }
@@ -289,8 +290,11 @@ fn load_history(cli: &Cli, history_path: Option<PathBuf>) -> (Vec<history::RunRe
     (Vec::new(), None)
 }
 
-/// Adds the audit to the history file returned by `load_history`.
-fn save_history(history_file: Option<PathBuf>, records: Vec<history::RunRecord>, report: &Report) {
+/// Adds the audit to the history file returned by `load_history`. The file
+/// is read again first: another run (a second terminal, the dashboard) may
+/// have added to it while this one was scanning, which takes minutes with
+/// `--report --online`.
+fn save_history(history_file: Option<PathBuf>, report: &Report) {
     // A run in which nothing could be evaluated has no score worth comparing.
     if let Some(path) = history_file.filter(|_| report.scorable) {
         let record = history::RunRecord::new(
@@ -299,7 +303,8 @@ fn save_history(history_file: Option<PathBuf>, records: Vec<history::RunRecord>,
             report.score,
             &report.checks,
         );
-        if let Err(err) = history::append(&path, records, record) {
+        // A file that became unreadable meanwhile is left alone, not overwritten.
+        if let Err(err) = history::load(&path).and_then(|records| history::append(&path, records, record)) {
             note(format_args!("{} could not save history: {err}", "Warning:".yellow()));
         }
     }
@@ -308,7 +313,8 @@ fn save_history(history_file: Option<PathBuf>, records: Vec<history::RunRecord>,
 /// `--report FILE`: runs the audit and every scan, and writes one HTML page.
 /// The exit code is 1 when the audit fails (as without `--report`) or a scan
 /// finds malware, a known-exploited vulnerability or a secret in a file
-/// tracked in git; otherwise `EXIT_INCOMPLETE` when an online lookup failed.
+/// tracked in git; otherwise `EXIT_INCOMPLETE` when part of a scan could not
+/// be done (e.g. an online lookup failed).
 fn run_report(
     cli: &Cli,
     path: &Path,
@@ -323,9 +329,9 @@ fn run_report(
         [] => lockfiles::default_files(),
         paths => vulns_paths(paths)?,
     };
-    let npm_roots = match cli.npm_path.as_slice() {
+    let (npm_roots, npm_unlocated) = match cli.npm_path.as_slice() {
         [] => npm::all_roots(runner),
-        paths => npm_roots(paths)?,
+        paths => (npm_roots(paths)?, None),
     };
     let secret_files = match cli.secrets_path.as_slice() {
         [] => secrets::default_files(),
@@ -359,6 +365,7 @@ fn run_report(
     vulns.skipped = skipped;
 
     let mut npm = npm::scan_with(&npm_roots, &progress);
+    npm.global_dir_problem = npm_unlocated;
     let npm_lookup = cli.online.then(|| npm.lookup_osv(&progress));
 
     let secrets = secrets::scan_with(&secret_files, &progress);
@@ -378,7 +385,7 @@ fn run_report(
     let audit_failed = exit_code(cli, config, &report.audit) == ExitCode::FAILURE;
     let threat = report.found_threat();
     let incomplete = report.incomplete();
-    save_history(history_file, records, &report.audit);
+    save_history(history_file, &report.audit);
     Ok(match (audit_failed || threat, incomplete) {
         (true, _) => ExitCode::FAILURE,
         (false, true) => ExitCode::from(EXIT_INCOMPLETE),
@@ -432,22 +439,26 @@ fn vulns_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 fn cache_dir() -> Result<PathBuf, String> {
     history::history_path()
         .and_then(|path| path.parent().map(|dir| dir.join("cache")))
-        .ok_or_else(|| "Could not determine the cache directory (HOME is not set).".to_string())
+        .ok_or_else(|| "Could not determine the cache directory (HOME is not set to an absolute path).".to_string())
 }
 
 /// `--npm`: scans installed npm packages in detail. The exit code is 1 if a
 /// confirmed malicious package was found; heuristic script warnings do not
-/// affect the code. A failed `--online` lookup gives `EXIT_INCOMPLETE`.
+/// affect the code. A failed `--online` lookup, or a failed `npm root -g`
+/// (npm's own global directory may then be missing), gives `EXIT_INCOMPLETE`.
 fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let format = text_or_json(cli, "--npm")?;
 
-    let roots = if cli.npm_path.is_empty() {
+    let (roots, unlocated) = if cli.npm_path.is_empty() {
         npm::all_roots(&SystemRunner::new())
     } else {
-        npm_roots(&cli.npm_path)?
+        (npm_roots(&cli.npm_path)?, None)
     };
 
     let mut scan = npm::scan(&roots);
+    // A custom npm prefix may not have been scanned: no all-clear then.
+    scan.global_dir_problem = unlocated;
+    let unlocated = usize::from(scan.global_dir_problem.is_some());
 
     // If OSV cannot be reached, the local results are still shown.
     let mut online = false;
@@ -476,13 +487,20 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
             "{} malicious, {} suspicious{}",
             report.scan.malware().count(),
             report.scan.suspicious().count(),
-            incomplete_note(&[(usize::from(incomplete), "OSV lookup failed", "OSV lookup failed")])
+            incomplete_note(&[
+                (usize::from(incomplete), "OSV lookup failed", "OSV lookup failed"),
+                (
+                    unlocated,
+                    "npm global directory not located",
+                    "npm global directory not located"
+                )
+            ])
         ),
         _ => report.to_text(),
     };
     emit(cli, &rendered)?;
 
-    Ok(match (found_malware, incomplete) {
+    Ok(match (found_malware, incomplete || unlocated > 0) {
         (true, _) => ExitCode::FAILURE,
         (false, true) => ExitCode::from(EXIT_INCOMPLETE),
         (false, false) => ExitCode::SUCCESS,
@@ -962,6 +980,37 @@ mod tests {
         }
         let report = section("## Full report");
         assert!(report.contains("lockfile could not be read") && report.contains("git could"));
+    }
+
+    #[test]
+    fn saving_keeps_a_run_recorded_while_this_one_was_scanning() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-save-{}", std::process::id()));
+        let path = dir.join("history.json");
+        let results = vec![score::tests::result("sip", checks::Status::Pass, 20)];
+        let record = |os: &str| history::RunRecord::new("2026-11-21T09:00:00+03:00".into(), os.into(), 100, &results);
+        history::append(&path, Vec::new(), record("first")).unwrap();
+        // This run loads the history, then another run adds to it.
+        let (loaded, file) = load_history(&parse(&[]).unwrap(), Some(path.clone()));
+        history::append(&path, history::load(&path).unwrap(), record("other")).unwrap();
+        let report = Report::new(
+            "2026-11-21T09:05:00+03:00".into(),
+            "this".into(),
+            results.clone(),
+            loaded.last(),
+        );
+        save_history(file, &report);
+        let saved: Vec<String> = history::load(&path)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.os_version)
+            .collect();
+        assert_eq!(saved, ["first", "other", "this"]);
+
+        // A file that became unreadable meanwhile is not overwritten.
+        std::fs::write(&path, "not json").unwrap();
+        save_history(Some(path.clone()), &report);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
