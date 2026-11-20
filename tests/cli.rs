@@ -857,3 +857,83 @@ fn npm_scan_says_when_npm_cannot_name_its_global_directory() {
         "{quiet}"
     );
 }
+
+/// With `HOME` unset, empty or relative there is no home folder: the scans
+/// that search it say so instead of reporting an empty, clean result, and
+/// the audit never takes the current folder's files for the user's.
+#[test]
+fn without_a_home_folder_nothing_is_scanned_as_if_it_were_one() {
+    let home = Home::new("no-home");
+    let work = home.path("project");
+    home.write(
+        "project/.env",
+        "GITHUB_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyz\n",
+    );
+    home.write("project/.config/swordcheck/audit.toml", "skip = [\"sip\"]\n");
+    let report = home.path("report.html");
+    for value in [None, Some(""), Some("relative")] {
+        let run = |args: &[&str]| {
+            let mut command = home.command(args);
+            match value {
+                Some(value) => command.env("HOME", value),
+                None => command.env_remove("HOME"),
+            };
+            command.current_dir(&work).output().unwrap()
+        };
+        let (report, work) = (str(&report), str(&work));
+        for (args, flag) in [
+            (vec!["--secrets"], "--secrets-path"),
+            (vec!["--vulns"], "--vulns-path"),
+            (vec!["--npm"], "--npm-path"),
+            (
+                vec!["--report", report, "--npm-path", work, "--secrets-path", work],
+                "--vulns-path",
+            ),
+            (
+                vec!["--report", report, "--vulns-path", work, "--secrets-path", work],
+                "--npm-path",
+            ),
+            (
+                vec!["--report", report, "--vulns-path", work, "--npm-path", work],
+                "--secrets-path",
+            ),
+        ] {
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(2), "HOME={value:?} {args:?}");
+            let message = stderr(&output);
+            assert!(
+                message.contains("HOME is not set to an absolute path, so there is no home folder to scan")
+                    && message.contains(flag),
+                "HOME={value:?} {args:?}: {message}"
+            );
+        }
+        assert!(!Path::new(report).exists(), "no report is written");
+        // An explicit path needs no home.
+        let secrets = run(&["--secrets", "--secrets-path", work, "--json"]);
+        assert_eq!(secrets.status.code(), Some(0), "HOME={value:?}");
+        assert!(String::from_utf8_lossy(&secrets.stdout).contains("\"provider\": \"GitHub\""));
+
+        let audit = run(&["--json", "--no-history", "--only", "sip,launch-items,npm-packages"]);
+        let json: serde_json::Value = serde_json::from_slice(&audit.stdout).expect("a JSON report");
+        let checks = json["checks"].as_array().unwrap();
+        let result = |id: &str| {
+            let check = checks.iter().find(|check| check["id"] == id).unwrap();
+            (
+                check["status"].as_str().unwrap().to_string(),
+                check["detail"].as_str().unwrap().to_string(),
+            )
+        };
+        // The current folder's .config/swordcheck/audit.toml is not the user's config.
+        assert!(checks.iter().any(|check| check["id"] == "sip"), "HOME={value:?}");
+        let (status, detail) = result("launch-items");
+        assert!(
+            status != "pass" && detail.contains("~/Library/LaunchAgents was not examined"),
+            "{status}: {detail}"
+        );
+        let (status, detail) = result("npm-packages");
+        assert!(
+            status != "pass" && detail.contains("npm directories in the home folder were not located"),
+            "{status}: {detail}"
+        );
+    }
+}

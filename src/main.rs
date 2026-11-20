@@ -26,6 +26,7 @@ mod config;
 mod envfile;
 mod full_report;
 mod history;
+mod home;
 mod lockfiles;
 mod net;
 mod npm;
@@ -326,15 +327,15 @@ fn run_report(
 ) -> Result<ExitCode, String> {
     // Check the paths before the slow part starts.
     let lockfile_paths = match cli.vulns_path.as_slice() {
-        [] => lockfiles::default_files(),
+        [] => home_for("--vulns-path").map(|_| lockfiles::default_files())?,
         paths => vulns_paths(paths)?,
     };
     let (npm_roots, npm_unlocated) = match cli.npm_path.as_slice() {
-        [] => npm::all_roots(runner),
+        [] => home_for("--npm-path").map(|_| npm::all_roots(runner))?,
         paths => (npm_roots(paths)?, None),
     };
     let secret_files = match cli.secrets_path.as_slice() {
-        [] => secrets::default_files(),
+        [] => home_for("--secrets-path").map(|_| secrets::default_files())?,
         paths => secret_files(paths)?,
     };
     // Every module reports what it is doing, one line each, on stderr.
@@ -377,7 +378,7 @@ fn run_report(
         npm,
         npm_lookup,
         secrets,
-        home: std::env::var_os("HOME").map(PathBuf::from),
+        home: home::dir(),
     };
     std::fs::write(path, report.to_html()).map_err(|err| format!("Could not write {}: {err}", path.display()))?;
     written(path);
@@ -390,6 +391,17 @@ fn run_report(
         (true, _) => ExitCode::FAILURE,
         (false, true) => ExitCode::from(EXIT_INCOMPLETE),
         (false, false) => ExitCode::SUCCESS,
+    })
+}
+
+/// A default scan searches the home directory. Without one it has nowhere
+/// to look, and an empty result would read like a clean one.
+fn home_for(flag: &str) -> Result<PathBuf, String> {
+    home::dir().ok_or_else(|| {
+        format!(
+            "{}, so there is no home folder to scan; set HOME or pass {flag}.",
+            home::MISSING
+        )
     })
 }
 
@@ -450,7 +462,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let format = text_or_json(cli, "--npm")?;
 
     let (roots, unlocated) = if cli.npm_path.is_empty() {
-        npm::all_roots(&SystemRunner::new())
+        home_for("--npm-path").map(|_| npm::all_roots(&SystemRunner::new()))?
     } else {
         (npm_roots(&cli.npm_path)?, None)
     };
@@ -514,7 +526,7 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     let format = text_or_json(cli, "--secrets")?;
 
     let files = if cli.secrets_path.is_empty() {
-        secrets::default_files()
+        home_for("--secrets-path").map(|_| secrets::default_files())?
     } else {
         secret_files(&cli.secrets_path)?
     };
@@ -558,6 +570,7 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
 
     // An explicit path narrows the scan to those projects.
     let (paths, system) = if cli.vulns_path.is_empty() {
+        home_for("--vulns-path")?;
         (lockfiles::default_files(), vulns::system_items(&SystemRunner::new()))
     } else {
         (vulns_paths(&cli.vulns_path)?, vulns::System::default())

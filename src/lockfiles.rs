@@ -41,6 +41,9 @@ impl Package {
 pub struct Lockfile {
     pub path: PathBuf,
     pub packages: BTreeSet<Package>,
+    /// Requirements files this one pulls in with `-r`; pip installs their
+    /// pins too, so the caller reads them as well (see `parse_included`).
+    pub includes: Vec<PathBuf>,
 }
 
 /// Lockfiles larger than this are not read.
@@ -50,17 +53,34 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// lockfile; `Err(reason)` if it is one but cannot be used, so the caller can
 /// say that its packages were not checked.
 pub fn parse_file(path: &Path) -> Result<Option<Lockfile>, &'static str> {
-    let Some(parser) = path.file_name().and_then(|name| name.to_str()).and_then(parser_for) else {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let Some(parser) = parser_for(name) else {
         return Ok(None);
     };
+    read(path, parser, is_requirements(name)).map(Some)
+}
+
+/// Reads a requirements file named by another one's `-r`, whatever its name
+/// (`requirements/base.txt` is a common layout).
+pub fn parse_included(path: &Path) -> Result<Lockfile, &'static str> {
+    read(path, requirements_txt, true)
+}
+
+fn read(path: &Path, parser: fn(&str) -> Vec<Package>, requirements: bool) -> Result<Lockfile, &'static str> {
     if std::fs::metadata(path).map_err(unreadable)?.len() > MAX_BYTES {
         return Err("over 64 MB");
     }
     let text = decode(std::fs::read(path).map_err(unreadable)?).ok_or("not UTF-8 or UTF-16 text")?;
-    Ok(Some(Lockfile {
+    let includes = if requirements {
+        requirement_includes(&text, path)
+    } else {
+        Vec::new()
+    };
+    Ok(Lockfile {
         path: path.to_path_buf(),
         packages: parser(&text).into_iter().collect(),
-    }))
+        includes,
+    })
 }
 
 /// Why a lockfile could not be read, in words for the report.
@@ -104,9 +124,13 @@ fn parser_for(file_name: &str) -> Option<fn(&str) -> Vec<Package>> {
         "composer.lock" => composer_lock,
         "Gemfile.lock" => gemfile_lock,
         "go.mod" => go_mod,
-        name if name.starts_with("requirements") && name.ends_with(".txt") => requirements_txt,
+        name if is_requirements(name) => requirements_txt,
         _ => return None,
     })
+}
+
+fn is_requirements(file_name: &str) -> bool {
+    file_name.starts_with("requirements") && file_name.ends_with(".txt")
 }
 
 pub fn is_lockfile(file_name: &str) -> bool {
@@ -481,9 +505,16 @@ fn python_index_source(package: &toml::Table) -> bool {
 /// `requirements*.txt`: only exact pins (`name==1.2.3`, `name===1.2.3`)
 /// identify a version.
 fn requirements_txt(text: &str) -> Vec<Package> {
-    let mut found = Vec::new();
-    // A trailing backslash continues the requirement on the next line, which
-    // is how `--hash` options are usually attached.
+    logical_lines(text)
+        .iter()
+        .filter_map(|line| requirement(line))
+        .collect()
+}
+
+/// The logical lines of a requirements file: a trailing backslash continues
+/// a line on the next one, which is how `--hash` options are usually attached.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut logical = String::new();
     for line in text.lines() {
         let is_comment = line.trim_start().starts_with('#');
@@ -493,23 +524,50 @@ fn requirements_txt(text: &str) -> Vec<Package> {
             continue;
         }
         logical.push_str(line);
-        found.extend(requirement(&logical));
-        logical.clear();
+        lines.push(std::mem::take(&mut logical));
     }
-    found.extend(requirement(&logical));
-    found
+    lines.push(logical);
+    lines
 }
 
-/// Parses one logical line of a requirements file.
-fn requirement(line: &str) -> Option<Package> {
-    // A comment starts at a `#` that begins the line or follows whitespace;
-    // a `#` inside a URL fragment is not one.
+/// A logical line without its comment. A comment starts at a `#` that begins
+/// the line or follows whitespace; a `#` inside a URL fragment is not one.
+fn without_comment(line: &str) -> &str {
     let comment = line
         .char_indices()
         .find(|&(at, c)| c == '#' && (at == 0 || line[..at].ends_with(char::is_whitespace)))
         .map_or(line.len(), |(at, _)| at);
+    &line[..comment]
+}
+
+/// The files a requirements file pulls in with `-r FILE`, `-rFILE` or
+/// `--requirement[=]FILE`, resolved against its folder as pip does. Only
+/// relative `.txt` paths are followed, so an include can only lead the scan
+/// to another requirements file of the project; URLs are never fetched.
+fn requirement_includes(text: &str, path: &Path) -> Vec<PathBuf> {
+    let folder = path.parent().unwrap_or(Path::new(""));
+    logical_lines(text)
+        .iter()
+        .filter_map(|line| {
+            let line = without_comment(line).trim();
+            let target = match line.strip_prefix("--requirement") {
+                Some(rest) if rest.starts_with(|c: char| c == '=' || c.is_whitespace()) => rest,
+                Some(_) => return None,
+                None => line.strip_prefix("-r")?,
+            };
+            let target = target.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+            // pip splits the options part like a shell, so a path may be quoted.
+            let target = target.trim_matches(['"', '\'']);
+            let relative = !target.contains("://") && !Path::new(target).is_absolute();
+            (relative && target.ends_with(".txt")).then(|| folder.join(target))
+        })
+        .collect()
+}
+
+/// Parses one logical line of a requirements file.
+fn requirement(line: &str) -> Option<Package> {
     // Environment markers follow a `;`.
-    let line = line[..comment].split(';').next()?.trim();
+    let line = without_comment(line).split(';').next()?.trim();
     // Options: `-r other.txt`, `-e .`, `--index-url …`.
     if line.starts_with('-') {
         return None;
@@ -767,7 +825,7 @@ const SKIP_DIRS: [&str; 16] = [
 /// Finds lockfiles under the home directory, skipping large folders that
 /// hold no projects.
 pub fn default_files() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::home::dir() else {
         return Vec::new();
     };
     const SKIP_TOP: [&str; 7] = ["Library", "Applications", "Music", "Movies", "Pictures", "Public", "go"];
@@ -1134,6 +1192,81 @@ mod tests {
             names(&pipfile_lock(pipfile)),
             ["PyPI:jinja2@3.1.2", "PyPI:pytest@8.0.0"]
         );
+    }
+
+    #[test]
+    fn requirements_name_the_files_they_include() {
+        let text = "\
+-r base.txt
+-rcompact.txt
+--requirement spaced.txt  # a comment
+--requirement=equals.txt
+-r \"quoted name.txt\"
+-r ../up.txt
+-r \\
+    continued.txt
+--requirements wrong-option.txt
+-r https://example.com/remote.txt
+-r /etc/absolute.txt
+-r requirements.in
+-c constraints.txt
+-e .
+# -r commented.txt
+django==3.2.0
+";
+        let includes = requirement_includes(text, Path::new("/p/app/requirements.txt"));
+        let expected: Vec<PathBuf> = [
+            "base.txt",
+            "compact.txt",
+            "spaced.txt",
+            "equals.txt",
+            "quoted name.txt",
+            "../up.txt",
+            "continued.txt",
+        ]
+        .iter()
+        .map(|name| Path::new("/p/app").join(name))
+        .collect();
+        assert_eq!(includes, expected);
+        // The pins of the same file are unaffected.
+        assert_eq!(names(&requirements_txt(text)), ["PyPI:django@3.2.0"]);
+        assert!(requirement_includes("-r base.txt\n", Path::new("requirements.txt")) == [PathBuf::from("base.txt")]);
+    }
+
+    #[test]
+    fn included_requirements_are_read_whatever_their_name() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-included-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("requirements")).unwrap();
+        let base = dir.join("requirements/base.txt");
+        std::fs::write(&base, "-r common.txt\ndjango==3.2.0\n").unwrap();
+        let top = dir.join("requirements.txt");
+        std::fs::write(&top, "-r requirements/base.txt\n").unwrap();
+        let lock = dir.join("package-lock.json");
+        std::fs::write(&lock, r#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
+
+        let included = parse_included(&base);
+        let top = parse_file(&top);
+        let lock = parse_file(&lock);
+        let missing = parse_included(&dir.join("requirements/missing.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // `base.txt` is no lockfile name, but a file pulled in with `-r` is read.
+        assert_eq!(parse_file(&base).ok().flatten().map(|_| ()), None);
+        let included = included.unwrap();
+        assert_eq!(
+            names(&included.packages.into_iter().collect::<Vec<_>>()),
+            ["PyPI:django@3.2.0"]
+        );
+        assert_eq!(included.includes, [dir.join("requirements/common.txt")]);
+        let top = top.unwrap().unwrap();
+        assert!(top.packages.is_empty());
+        assert_eq!(top.includes, [dir.join("requirements/base.txt")]);
+        assert!(
+            lock.unwrap().unwrap().includes.is_empty(),
+            "only requirements files include others"
+        );
+        assert_eq!(missing.err(), Some("could not be read"));
     }
 
     #[test]

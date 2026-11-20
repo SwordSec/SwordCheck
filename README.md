@@ -122,7 +122,7 @@ means the advice points to the place in System Settings (or Recovery).
 | --- | --- |
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
-| 2 | Usage or configuration error |
+| 2 | Usage or configuration error, including a scan of the home folder when there is none (`HOME` unset, empty or relative) |
 | 3 | The scan is incomplete: `--npm` / `--vulns` / `--report` with `--online`: a lookup failed; `--vulns` / `--report`: a lockfile could not be read (no permission, over 64 MB, not UTF-8/UTF-16 text); `--secrets` / `--report`: git could not tell whether a file with a secret is tracked; `--npm` / `--report`: `npm root -g` failed, so npm's own global directory may not have been scanned |
 
 The scan modes use 1 for their own "found something" condition (described in
@@ -188,6 +188,9 @@ ranks them by how likely they are to be exploited.
   `pnpm-lock.yaml`, `requirements*.txt` (pinned lines), `poetry.lock`,
   `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`, `go.mod`, found
   under your home directory. Dependency and build directories are skipped.
+  A requirements file's `-r other.txt` includes are read too, whatever their
+  name (e.g. `requirements/base.txt`); only relative `.txt` paths are
+  followed, and an include that cannot be read makes the scan incomplete.
 - **Homebrew:** installed formulae are read from the Cellar (`/opt/homebrew`,
   `/usr/local` or `HOMEBREW_PREFIX`); `brew` itself is never run. Well-known
   formulae (`openssl`, `curl`, `git`, `node`, `python`, `php`, …) are looked
@@ -431,6 +434,12 @@ be tested against canned output with `MockRunner`.
   report. SwordCheck is not a CIS-certified tool.
 - `launch-items` uses simple heuristics (programs running from temporary or
   hidden directories, download-and-execute, etc.); a warning is not a verdict.
+- An unset, empty or relative `HOME` is no home folder, never the current
+  folder. `--secrets`, `--vulns`, `--npm` and `--report` then exit with 2
+  unless each scan that searches the home folder is given a path
+  (`--secrets-path`, `--vulns-path`, `--npm-path`). In the audit,
+  `launch-items` and `npm-packages` say what they could not examine (UNKNOWN
+  instead of PASS), and `~/.config/swordcheck/audit.toml` is not looked up.
 - This tool covers baseline configuration checks. It is not a replacement for
   a full security assessment.
 

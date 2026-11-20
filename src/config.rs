@@ -92,9 +92,7 @@ impl Config {
 
 fn default_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("audit.toml")];
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(Path::new(&home).join(".config/swordcheck/audit.toml"));
-    }
+    paths.extend(crate::home::dir().map(|home| home.join(".config/swordcheck/audit.toml")));
     paths
 }
 

@@ -1130,7 +1130,7 @@ fn summarize(findings: &[Finding]) -> Vec<ProviderSummary> {
 // ---- Finding the files to scan ----
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::home::dir()
 }
 
 /// Files in the home directory that are known to hold secrets.
