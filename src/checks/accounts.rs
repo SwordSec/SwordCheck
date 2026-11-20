@@ -22,7 +22,7 @@ impl Check for AutoLogin {
         Severity::High
     }
     fn cis(&self) -> Option<&'static str> {
-        Some("2.12.3")
+        Some("2.13.3")
     }
     // No suggested command: deleting the `autoLoginUser` preference with
     // `defaults` stops the automatic login but leaves /etc/kcpassword on
@@ -64,7 +64,7 @@ impl Check for GuestAccount {
         Severity::Medium
     }
     fn cis(&self) -> Option<&'static str> {
-        Some("2.12.1")
+        Some("2.13.1")
     }
     fn fix(&self) -> Option<Fix> {
         Some(Fix {
@@ -84,9 +84,7 @@ impl Check for GuestAccount {
             // If the key is missing the guest account was never enabled.
             Pref::Value(value) if value == "0" => Outcome::pass("The guest account is disabled."),
             Pref::Missing => Outcome::pass("The guest account is disabled."),
-            Pref::Value(value) => {
-                Outcome::unknown(format!("Unexpected value for GuestEnabled: {value:?}"))
-            }
+            Pref::Value(value) => Outcome::unknown(format!("Unexpected value for GuestEnabled: {value:?}")),
             Pref::Error(err) => Outcome::unknown(err),
         }
     }
@@ -138,7 +136,7 @@ impl Check for ScreenLock {
         Severity::Medium
     }
     fn cis(&self) -> Option<&'static str> {
-        Some("2.10")
+        Some("2.11.2")
     }
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
@@ -151,9 +149,7 @@ impl Check for ScreenLock {
         };
 
         match parse_lock_delay(&output) {
-            Some(LockDelay::Immediate) => {
-                Outcome::pass("The password is required immediately after locking.")
-            }
+            Some(LockDelay::Immediate) => Outcome::pass("The password is required immediately after locking."),
             Some(LockDelay::Seconds(secs)) if secs <= MAX_LOCK_DELAY_SECS => {
                 Outcome::pass(format!("The password is required after {secs} seconds."))
             }
@@ -161,9 +157,7 @@ impl Check for ScreenLock {
                 format!("The password is required {secs} seconds after locking."),
                 ADVICE,
             ),
-            Some(LockDelay::Off) => {
-                Outcome::fail("The screen lock does not require a password.", ADVICE)
-            }
+            Some(LockDelay::Off) => Outcome::fail("The screen lock does not require a password.", ADVICE),
             None => Outcome::unknown("The screen lock state could not be read."),
         }
     }
@@ -252,14 +246,8 @@ mod tests {
     #[test]
     fn guest_account() {
         let cmd = format!("defaults read {LOGIN_WINDOW} GuestEnabled");
-        assert_eq!(
-            GuestAccount.run(&MockRunner::new().ok(&cmd, "1")).status,
-            Status::Fail
-        );
-        assert_eq!(
-            GuestAccount.run(&MockRunner::new().ok(&cmd, "0")).status,
-            Status::Pass
-        );
+        assert_eq!(GuestAccount.run(&MockRunner::new().ok(&cmd, "1")).status, Status::Fail);
+        assert_eq!(GuestAccount.run(&MockRunner::new().ok(&cmd, "0")).status, Status::Pass);
         assert_eq!(
             GuestAccount.run(&MockRunner::new().fail(&cmd, MISSING)).status,
             Status::Pass

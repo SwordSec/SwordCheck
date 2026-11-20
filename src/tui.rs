@@ -168,7 +168,13 @@ impl ResultView {
         if !rows.is_empty() {
             list.select(Some(0));
         }
-        Self { module, headline, rows, list, empty }
+        Self {
+            module,
+            headline,
+            rows,
+            list,
+            empty,
+        }
     }
 }
 
@@ -213,15 +219,23 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
 
     for item in &scan.system {
         let title = item.title();
-        let mut detail = vec![Detail::Heading(title.clone()), Detail::Dim(item.cpe.clone()), Detail::Blank];
+        let mut detail = vec![
+            Detail::Heading(title.clone()),
+            Detail::Dim(item.cpe.clone()),
+            Detail::Blank,
+        ];
         let (tag, tone) = if !scan.online {
-            detail.push(Detail::Text("Not looked up yet. Enable online lookups on the home screen and run again.".into()));
+            detail.push(Detail::Text(
+                "Not looked up yet. Enable online lookups on the home screen and run again.".into(),
+            ));
             ("APP", Tone::Dim)
         } else if let Some(error) = &item.error {
             detail.push(Detail::Text(format!("The NVD lookup failed: {error}")));
             ("?", Tone::Warn)
         } else if item.exploited.is_empty() {
-            detail.push(Detail::Text("No known-exploited vulnerability affects this version.".into()));
+            detail.push(Detail::Text(
+                "No known-exploited vulnerability affects this version.".into(),
+            ));
             ("OK", Tone::Good)
         } else {
             detail.push(Detail::Text(format!(
@@ -235,7 +249,12 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
             }
             ("KEV", Tone::Bad)
         };
-        rows.push(Row { tag: tag.into(), tone, title, detail });
+        rows.push(Row {
+            tag: tag.into(),
+            tone,
+            title,
+            detail,
+        });
     }
     // Products that need attention go first; healthy ones go after the
     // dependency findings so they do not push real problems off screen.
@@ -264,21 +283,32 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
         }
         detail.push(Detail::Text(format!("Severity   {}", finding.severity.label())));
         if let Some(epss) = finding.epss {
-            detail.push(Detail::Text(format!("EPSS       {:.1}% chance of exploitation in 30 days", epss * 100.0)));
+            detail.push(Detail::Text(format!(
+                "EPSS       {:.1}% chance of exploitation in 30 days",
+                epss * 100.0
+            )));
         }
         if let Some(kev) = &finding.kev {
             let ransomware = if kev.ransomware { ", used in ransomware" } else { "" };
-            detail.push(Detail::Text(format!("Exploited  in CISA KEV since {}{ransomware}", kev.date_added)));
+            detail.push(Detail::Text(format!(
+                "Exploited  in CISA KEV since {}{ransomware}",
+                kev.date_added
+            )));
         }
         if !finding.fixed.is_empty() {
             detail.push(Detail::Text(format!("Fixed in   {}", finding.fixed.join(", "))));
         }
         detail.push(Detail::Blank);
-        detail.push(Detail::Heading(format!("Pinned by {} lockfile(s)", finding.lockfile_count)));
+        detail.push(Detail::Heading(format!(
+            "Pinned by {} lockfile(s)",
+            finding.lockfile_count
+        )));
         detail.extend(finding.lockfiles.iter().map(|path| Detail::Dim(short_path(path))));
         if exploited {
             detail.push(Detail::Blank);
-            detail.push(Detail::Text("This is being exploited in the wild. Fix it first.".into()));
+            detail.push(Detail::Text(
+                "This is being exploited in the wild. Fix it first.".into(),
+            ));
         }
         rows.push(Row {
             tag: tag.into(),
@@ -292,20 +322,36 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
 
     let mut headline = vec![(
         Tone::Plain,
-        format!("{} lockfiles · {} packages · {} system products", scan.lockfiles, scan.packages, scan.system.len()),
+        format!(
+            "{} lockfiles · {} packages · {} system products",
+            scan.lockfiles,
+            scan.packages,
+            scan.system.len()
+        ),
     )];
     if scan.online {
         let exploited = scan.exploited();
         headline.push((
             if exploited > 0 { Tone::Bad } else { Tone::Good },
-            format!("{} findings · {exploited} known-exploited or malware", scan.findings.len()),
+            format!(
+                "{} findings · {exploited} known-exploited or malware",
+                scan.findings.len()
+            ),
         ));
     } else {
-        headline.push((Tone::Warn, "Inventory only: online lookups are off (press esc, then o).".into()));
+        headline.push((
+            Tone::Warn,
+            "Inventory only: online lookups are off (press esc, then o).".into(),
+        ));
     }
     headline.extend(scan.unmatched_note().map(|note| (Tone::Dim, note)));
     headline.extend(scan.warnings.iter().map(|warning| (Tone::Warn, warning.clone())));
-    ResultView::new(Module::Vulns, headline, rows, "Nothing to scan: no lockfiles or known apps were found.")
+    ResultView::new(
+        Module::Vulns,
+        headline,
+        rows,
+        "Nothing to scan: no lockfiles or known apps were found.",
+    )
 }
 
 /// `lookup` is `None` when online lookups are off, otherwise whether the
@@ -348,16 +394,34 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
         None => "built-in list only (online lookups are off)",
     };
     let mut headline = vec![
-        (Tone::Plain, format!("{} directories · {} package installs · {source}", scan.roots.len(), scan.packages)),
+        (
+            Tone::Plain,
+            format!(
+                "{} directories · {} package installs · {source}",
+                scan.roots.len(),
+                scan.packages
+            ),
+        ),
         (
             if malware > 0 { Tone::Bad } else { Tone::Good },
-            format!("{malware} malicious · {} suspicious install scripts", scan.suspicious().count()),
+            format!(
+                "{malware} malicious · {} suspicious install scripts",
+                scan.suspicious().count()
+            ),
         ),
     ];
     if let Some(Err(err)) = lookup {
-        headline.push((Tone::Warn, format!("OSV lookup failed, so the scan is incomplete: {err}")));
+        headline.push((
+            Tone::Warn,
+            format!("OSV lookup failed, so the scan is incomplete: {err}"),
+        ));
     }
-    ResultView::new(Module::Npm, headline, rows, "No malicious or suspicious packages found.")
+    ResultView::new(
+        Module::Npm,
+        headline,
+        rows,
+        "No malicious or suspicious packages found.",
+    )
 }
 
 fn secrets_view(scan: &secrets::Scan) -> ResultView {
@@ -417,19 +481,39 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
         .collect();
 
     let tracked = scan.tracked().count();
-    let providers: Vec<String> = scan.summary.iter().map(|row| format!("{} {}", row.provider, row.secrets)).collect();
+    let providers: Vec<String> = scan
+        .summary
+        .iter()
+        .map(|row| format!("{} {}", row.provider, row.secrets))
+        .collect();
     let mut headline = vec![
         (
             Tone::Plain,
-            format!("{} files · {} secrets · {} locations", scan.files_scanned, scan.unique_secrets(), scan.findings.len()),
+            format!(
+                "{} files · {} secrets · {} locations",
+                scan.files_scanned,
+                scan.unique_secrets(),
+                scan.findings.len()
+            ),
         ),
         (
             if tracked > 0 { Tone::Bad } else { Tone::Dim },
-            if tracked > 0 { format!("{tracked} in git-tracked files · {}", providers.join(" · ")) } else { providers.join(" · ") },
+            if tracked > 0 {
+                format!("{tracked} in git-tracked files · {}", providers.join(" · "))
+            } else {
+                providers.join(" · ")
+            },
         ),
     ];
     if scan.files_skipped > 0 {
-        headline.push((Tone::Warn, format!("{} files skipped, not scanned: {}", scan.files_skipped, scan.skipped.reasons())));
+        headline.push((
+            Tone::Warn,
+            format!(
+                "{} files skipped, not scanned: {}",
+                scan.files_skipped,
+                scan.skipped.reasons()
+            ),
+        ));
     }
     ResultView::new(Module::Secrets, headline, rows, "No secrets found.")
 }
@@ -515,7 +599,11 @@ impl Job {
             return None;
         }
         let handle = self.handle.take()?;
-        Some(handle.join().map_err(|_| format!("{} stopped unexpectedly.", self.module.title())))
+        Some(
+            handle
+                .join()
+                .map_err(|_| format!("{} stopped unexpectedly.", self.module.title())),
+        )
     }
 }
 
@@ -528,7 +616,8 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             checks.retain(|check| setup.check_ids.iter().any(|id| id == check.id()));
             let results = checks::run_checks_with(&checks, &runner, &setup.config, progress);
             // A cancelled audit is not a result worth recording.
-            let trend = (setup.save_history && !progress.cancelled()).then(|| record_audit(&results, &setup.os_version));
+            let trend =
+                (setup.save_history && !progress.cancelled()).then(|| record_audit(&results, &setup.os_version));
             Outcome::Audit(results, trend)
         }
         Module::Vulns => {
@@ -539,9 +628,14 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             let lockfiles = vulns::read_lockfiles(&paths, progress);
             let cache = history::history_path().and_then(|path| path.parent().map(|dir| dir.join("cache")));
             let scan = match (online, cache) {
-                (true, Some(cache)) => {
-                    vulns::scan(&lockfiles, system, &vulns::Online { cache, progress: progress.clone() })
-                }
+                (true, Some(cache)) => vulns::scan(
+                    &lockfiles,
+                    system,
+                    &vulns::Online {
+                        cache,
+                        progress: progress.clone(),
+                    },
+                ),
                 _ => vulns::offline(&lockfiles, system),
             };
             Outcome::View(vulns_view(&scan))
@@ -619,7 +713,12 @@ impl App {
     fn new(setup: Setup) -> Self {
         let mut menu = ListState::default();
         menu.select(Some(0));
-        Self { setup: Arc::new(setup), screen: Screen::Home, menu, online: false }
+        Self {
+            setup: Arc::new(setup),
+            screen: Screen::Home,
+            menu,
+            online: false,
+        }
     }
 
     fn selected_module(&self) -> Module {
@@ -752,7 +851,19 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<
     /// spinner and progress bar to look alive.
     const FRAME: Duration = Duration::from_millis(80);
 
+    // Closing the terminal window (SIGHUP) or `kill` (SIGTERM) would end the
+    // process in raw mode on the alternate screen. The handlers only set a
+    // flag; the loop sees it within a frame and returns, so `run` restores
+    // the terminal the same way as after `q`.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register(signal, Arc::clone(&stop))?;
+    }
+
     loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         app.tick();
         terminal.draw(|frame| draw(frame, app))?;
 
@@ -784,7 +895,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let keys: &[(&str, &str)] = match &mut app.screen {
         Screen::Home => {
             draw_home(frame, body, &mut app.menu, app.online, &app.setup.os_version);
-            &[("↑↓", "select"), ("enter", "run"), ("o", "online lookups on/off"), ("q", "quit")]
+            &[
+                ("↑↓", "select"),
+                ("enter", "run"),
+                ("o", "online lookups on/off"),
+                ("q", "quit"),
+            ]
         }
         Screen::Running(job) => {
             draw_running(frame, body, job, job.started.elapsed());
@@ -792,11 +908,22 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
         Screen::Audit(view) => {
             draw_audit(frame, body, view, &app.setup.os_version);
-            &[("↑↓/jk", "navigate"), ("r", "re-run audit"), ("esc", "home"), ("q", "quit")]
+            &[
+                ("↑↓/jk", "navigate"),
+                ("r", "re-run audit"),
+                ("esc", "home"),
+                ("q", "quit"),
+            ]
         }
         Screen::Results(view) => {
             draw_results(frame, body, view);
-            &[("↑↓/jk", "navigate"), ("PgUp/PgDn", "jump"), ("r", "re-run"), ("esc", "home"), ("q", "quit")]
+            &[
+                ("↑↓/jk", "navigate"),
+                ("PgUp/PgDn", "jump"),
+                ("r", "re-run"),
+                ("esc", "home"),
+                ("q", "quit"),
+            ]
         }
         Screen::Failed(message) => {
             let text = Paragraph::new(message.as_str()).block(Block::bordered().title(" Something went wrong "));
@@ -833,7 +960,10 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
         .enumerate()
         .map(|(index, module)| {
             ListItem::new(vec![
-                Line::from(vec![Span::styled(format!(" {} ", index + 1), dim), Span::styled(module.title(), bold)]),
+                Line::from(vec![
+                    Span::styled(format!(" {} ", index + 1), dim),
+                    Span::styled(module.title(), bold),
+                ]),
                 Line::from(Span::styled(format!("   {}", module.tagline()), dim)),
             ])
         })
@@ -846,7 +976,11 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
     let mut about: Vec<Line> = selected.description().iter().map(|line| Line::from(*line)).collect();
     about.push(Line::default());
     about.push(Line::from(Span::styled(
-        if selected.uses_network() { "Uses the online toggle below." } else { "Not affected by the online toggle." },
+        if selected.uses_network() {
+            "Uses the online toggle below."
+        } else {
+            "Not affected by the online toggle."
+        },
         dim,
     )));
     let about = Paragraph::new(about)
@@ -864,7 +998,11 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
     } else {
         "  nothing leaves this machine"
     };
-    let line = Line::from(vec![Span::raw(" Online lookups: "), state, Span::styled(explanation, dim)]);
+    let line = Line::from(vec![
+        Span::raw(" Online lookups: "),
+        state,
+        Span::styled(explanation, dim),
+    ]);
     frame.render_widget(Paragraph::new(line).block(Block::bordered()), toggle);
 }
 
@@ -877,7 +1015,9 @@ fn clock(elapsed: Duration) -> String {
 fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
     // A fixed-size box in the middle of the screen.
     let [column] = Layout::horizontal([Constraint::Max(84)]).flex(Flex::Center).areas(area);
-    let [boxed] = Layout::vertical([Constraint::Max(MAX_NOTES as u16 + 9)]).flex(Flex::Center).areas(column);
+    let [boxed] = Layout::vertical([Constraint::Max(MAX_NOTES as u16 + 9)])
+        .flex(Flex::Center)
+        .areas(column);
     frame.render_widget(Clear, boxed);
 
     let mode = match (job.module.uses_network(), job.online) {
@@ -897,7 +1037,10 @@ fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas(inner.inner(ratatui::layout::Margin { horizontal: 2, vertical: 1 }));
+    .areas(inner.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    }));
 
     // The spinner advances with time, so it moves even when no event arrives.
     const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -917,7 +1060,13 @@ fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
             .ratio(ratio)
             .label(format!("{:.0}%", ratio * 100.0));
         frame.render_widget(gauge, bar_area);
-        let count = format!("{} of {} · step {} · elapsed {}", job.done, job.total, job.stages.max(1), clock(elapsed));
+        let count = format!(
+            "{} of {} · step {} · elapsed {}",
+            job.done,
+            job.total,
+            job.stages.max(1),
+            clock(elapsed)
+        );
         frame.render_widget(Paragraph::new(Span::styled(count, dim)), count_area);
     } else {
         // No total is known for this phase: show a block sliding back and
@@ -943,7 +1092,11 @@ fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
     }
 
     // Newest note at the bottom, older ones fading above it.
-    let notes: Vec<Line> = job.notes.iter().map(|note| Line::from(Span::styled(note.as_str(), dim))).collect();
+    let notes: Vec<Line> = job
+        .notes
+        .iter()
+        .map(|note| Line::from(Span::styled(note.as_str(), dim)))
+        .collect();
     frame.render_widget(Paragraph::new(notes), notes_area);
 }
 
@@ -951,26 +1104,43 @@ fn draw_results(frame: &mut Frame, area: Rect, view: &mut ResultView) {
     // Long lines (warnings above all) wrap instead of being cut off, so the
     // header grows with them, up to half the screen.
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let wrapped: usize =
-        view.headline.iter().map(|(_, text)| (text.chars().count() + 1).div_ceil(inner_width).max(1)).sum();
+    let wrapped: usize = view
+        .headline
+        .iter()
+        .map(|(_, text)| (text.chars().count() + 1).div_ceil(inner_width).max(1))
+        .sum();
     let header_height = (wrapped as u16 + 2).min((area.height / 2).max(3));
     let [header, body] = Layout::vertical([Constraint::Length(header_height), Constraint::Min(5)]).areas(area);
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
 
-    let headline: Vec<Line> =
-        view.headline.iter().map(|(tone, text)| Line::from(Span::styled(format!(" {text}"), tone.style()))).collect();
+    let headline: Vec<Line> = view
+        .headline
+        .iter()
+        .map(|(tone, text)| Line::from(Span::styled(format!(" {text}"), tone.style())))
+        .collect();
     let title = format!(" {} ", view.module.title());
-    let headline = Paragraph::new(headline).block(Block::bordered().title(title)).wrap(Wrap { trim: false });
+    let headline = Paragraph::new(headline)
+        .block(Block::bordered().title(title))
+        .wrap(Wrap { trim: false });
     frame.render_widget(headline, header);
 
-    let width = view.rows.iter().map(|row| row.tag.chars().count()).max().unwrap_or(0).min(12);
+    let width = view
+        .rows
+        .iter()
+        .map(|row| row.tag.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(12);
     let items: Vec<ListItem> = view
         .rows
         .iter()
         .map(|row| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {:<width$} ", row.tag), row.tone.style().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {:<width$} ", row.tag),
+                    row.tone.style().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(row.title.as_str()),
             ]))
         })
@@ -983,7 +1153,10 @@ fn draw_results(frame: &mut Frame, area: Rect, view: &mut ResultView) {
 
     let block = Block::bordered().title(" Detail ");
     let Some(row) = view.list.selected().and_then(|index| view.rows.get(index)) else {
-        frame.render_widget(Paragraph::new(view.empty).block(block).wrap(Wrap { trim: false }), detail_area);
+        frame.render_widget(
+            Paragraph::new(view.empty).block(block).wrap(Wrap { trim: false }),
+            detail_area,
+        );
         return;
     };
     let lines: Vec<Line> = row
@@ -996,7 +1169,10 @@ fn draw_results(frame: &mut Frame, area: Rect, view: &mut ResultView) {
             Detail::Blank => Line::default(),
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), detail_area);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        detail_area,
+    );
 }
 
 fn draw_audit(frame: &mut Frame, area: Rect, view: &mut AuditView, os_version: &str) {
@@ -1078,13 +1254,20 @@ fn draw_check_detail(frame: &mut Frame, area: Rect, selected: Option<&CheckResul
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let dim = Style::new().fg(Color::DarkGray);
 
-    let status = if result.exempt.is_some() { "EXCEPTION" } else { result.status.label() };
+    let status = if result.exempt.is_some() {
+        "EXCEPTION"
+    } else {
+        result.status.label()
+    };
 
     let mut lines = vec![
         Line::from(Span::styled(result.name, bold)),
         Line::from(vec![
             Span::styled(status, Style::new().fg(color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  ·  {}  ·  weight {}", report::meta(result), result.weight), dim),
+            Span::styled(
+                format!("  ·  {}  ·  weight {}", report::meta(result), result.weight),
+                dim,
+            ),
         ]),
         Line::default(),
         Line::from(result.detail.as_str()),
@@ -1103,7 +1286,10 @@ fn draw_check_detail(frame: &mut Frame, area: Rect, selected: Option<&CheckResul
     if let (true, Some(fix)) = (result.is_issue(), result.fix) {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled("Command to run yourself", bold)));
-        lines.push(Line::from(Span::styled(fix.command_line(), Style::new().fg(Color::Cyan))));
+        lines.push(Line::from(Span::styled(
+            fix.command_line(),
+            Style::new().fg(Color::Cyan),
+        )));
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(format!("id: {}", result.id), dim)));
@@ -1120,16 +1306,24 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn app() -> App {
-        App::new(Setup { save_history: false, check_ids: Vec::new(), config: Config::default(), os_version: "macOS 26.6.2".into() })
+        App::new(Setup {
+            save_history: false,
+            check_ids: Vec::new(),
+            config: Config::default(),
+            os_version: "macOS 26.6.2".into(),
+        })
     }
 
     fn audit_app() -> App {
         let mut app = app();
-        app.screen = Screen::Audit(AuditView::new(vec![
-            result("firewall", Status::Pass, 20),
-            result("filevault", Status::Fail, 25),
-            result("ssh", Status::Warn, 10),
-        ], Some("previous 40 (+5), 1 changed".into())));
+        app.screen = Screen::Audit(AuditView::new(
+            vec![
+                result("firewall", Status::Pass, 20),
+                result("filevault", Status::Fail, 25),
+                result("ssh", Status::Warn, 10),
+            ],
+            Some("previous 40 (+5), 1 changed".into()),
+        ));
         app
     }
 
@@ -1232,7 +1426,11 @@ mod tests {
         assert_eq!(job.notes.front().unwrap(), "note 2", "the oldest notes are dropped");
 
         job.apply(ProgressEvent::Stage("Fetching EPSS".into()));
-        assert_eq!((job.stages, job.done, job.total), (2, 0, 0), "a new stage resets the counter");
+        assert_eq!(
+            (job.stages, job.done, job.total),
+            (2, 0, 0),
+            "a new stage resets the counter"
+        );
         assert!(job.notes.is_empty());
     }
 
@@ -1259,7 +1457,10 @@ mod tests {
         let mut app = app();
         app.screen = Screen::Running(idle_job(Module::Vulns, true));
         app.on_key(KeyCode::Enter);
-        assert!(matches!(app.screen, Screen::Running(_)), "a double press on the home screen must not abandon the job");
+        assert!(
+            matches!(app.screen, Screen::Running(_)),
+            "a double press on the home screen must not abandon the job"
+        );
         app.on_key(KeyCode::Esc);
         assert!(matches!(app.screen, Screen::Home));
     }
@@ -1281,7 +1482,10 @@ mod tests {
 
     #[test]
     fn long_warnings_wrap_instead_of_being_cut_off() {
-        let warning = format!("OSV lookup failed: {} END-OF-WARNING", "curl: (6) could not resolve host ".repeat(5));
+        let warning = format!(
+            "OSV lookup failed: {} END-OF-WARNING",
+            "curl: (6) could not resolve host ".repeat(5)
+        );
         let mut app = app();
         app.screen = Screen::Results(ResultView::new(
             Module::Vulns,
@@ -1300,7 +1504,10 @@ mod tests {
         let failed = npm_view(&scan, Some(Err("offline".into())));
         let text: Vec<&str> = failed.headline.iter().map(|(_, text)| text.as_str()).collect();
         assert!(text[0].ends_with("built-in list only"), "{text:?}");
-        assert!(text.iter().any(|line| line.contains("OSV lookup failed") && line.contains("offline")));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("OSV lookup failed") && line.contains("offline"))
+        );
         assert!(npm_view(&scan, None).headline[0].1.contains("online lookups are off"));
         assert!(npm_view(&scan, Some(Ok(()))).headline[0].1.contains("OSV.dev"));
     }
@@ -1319,14 +1526,22 @@ mod tests {
         assert!(screen.contains("█"));
 
         app.on_key(KeyCode::Esc);
-        assert!(matches!(app.screen, Screen::Home), "esc cancels back to the home screen");
+        assert!(
+            matches!(app.screen, Screen::Home),
+            "esc cancels back to the home screen"
+        );
     }
 
     #[test]
     fn results_screen_shows_rows_and_selected_detail() {
         let mut app = app();
         let headline = vec![(Tone::Bad, "2 findings".to_string())];
-        app.screen = Screen::Results(ResultView::new(Module::Npm, headline, vec![row("KEV", "first"), row("HIGH", "second")], "none"));
+        app.screen = Screen::Results(ResultView::new(
+            Module::Npm,
+            headline,
+            vec![row("KEV", "first"), row("HIGH", "second")],
+            "none",
+        ));
 
         let screen = render(&mut app);
         assert!(screen.contains("npm malware scan"));
@@ -1346,7 +1561,12 @@ mod tests {
     #[test]
     fn empty_results_show_the_empty_message() {
         let mut app = app();
-        app.screen = Screen::Results(ResultView::new(Module::Secrets, Vec::new(), Vec::new(), "No secrets found."));
+        app.screen = Screen::Results(ResultView::new(
+            Module::Secrets,
+            Vec::new(),
+            Vec::new(),
+            "No secrets found.",
+        ));
         app.on_key(KeyCode::Down);
         assert!(render(&mut app).contains("No secrets found."));
     }
@@ -1382,7 +1602,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
         // Built at run time so that no key-shaped string sits in the source.
-        let key = format!("ghp_{}", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3lM6".chars().rev().collect::<String>());
+        let key = format!(
+            "ghp_{}",
+            "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3lM6".chars().rev().collect::<String>()
+        );
         std::fs::write(dir.join("a/.env"), format!("GITHUB_TOKEN={key}\n")).unwrap();
         std::fs::write(dir.join("b/.env"), format!("GH={key}\n")).unwrap();
 
@@ -1392,7 +1615,11 @@ mod tests {
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0].tag, "GITHUB");
         assert!(view.rows[0].title.starts_with("GITHUB_TOKEN"));
-        assert!(view.rows[0].detail.contains(&Detail::Heading("Same secret in 1 other file(s)".into())));
+        assert!(
+            view.rows[0]
+                .detail
+                .contains(&Detail::Heading("Same secret in 1 other file(s)".into()))
+        );
         assert!(view.headline[0].1.contains("1 secrets · 2 locations"));
         let everything = format!("{:?}{:?}", view.rows, view.headline);
         assert!(!everything.contains(&key), "the raw secret never reaches the dashboard");

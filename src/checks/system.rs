@@ -274,10 +274,7 @@ fn recorded_pending(runner: &dyn CommandRunner) -> Result<Pending, String> {
     // `plutil -extract` gives the list as JSON.
     let plist = format!("{SOFTWARE_UPDATE}.plist");
     let listed = runner
-        .run(
-            "plutil",
-            &["-extract", "RecommendedUpdates", "json", "-o", "-", &plist],
-        )
+        .run("plutil", &["-extract", "RecommendedUpdates", "json", "-o", "-", &plist])
         .ok()
         .filter(|out| out.success)
         .and_then(|out| pending_update_names(&out.stdout));
@@ -330,12 +327,8 @@ fn pending_outcome(pending: &Pending, check_age_days: Result<u64, String>) -> Ou
          and turn on automatic checking there (the (i) button next to \"Automatic Updates\").";
 
     let waiting = match pending {
-        Pending::Names(names) if !names.is_empty() => {
-            Some(format!("Waiting to be installed: {}.", names.join(", ")))
-        }
-        Pending::Count(count) if *count > 0 => {
-            Some(format!("{count} update(s) waiting to be installed."))
-        }
+        Pending::Names(names) if !names.is_empty() => Some(format!("Waiting to be installed: {}.", names.join(", "))),
+        Pending::Count(count) if *count > 0 => Some(format!("{count} update(s) waiting to be installed.")),
         _ => None,
     };
 
@@ -379,17 +372,8 @@ fn pending_update_names(json: &str) -> Option<Vec<String>> {
     Some(
         updates
             .iter()
-            .filter(|update| {
-                !update["Identifier"]
-                    .as_str()
-                    .is_some_and(|id| id.ends_with("_major"))
-            })
-            .map(|update| {
-                update["Display Name"]
-                    .as_str()
-                    .unwrap_or("unnamed update")
-                    .to_string()
-            })
+            .filter(|update| !update["Identifier"].as_str().is_some_and(|id| id.ends_with("_major")))
+            .map(|update| update["Display Name"].as_str().unwrap_or("unnamed update").to_string())
             .collect(),
     )
 }
@@ -427,10 +411,7 @@ impl Check for XProtect {
             .iter()
             .filter_map(|bundle| {
                 let plist = format!("{bundle}/Contents/Info.plist");
-                let modified: u64 = stdout_of(runner, "stat", &["-f", "%m", &plist])
-                    .ok()?
-                    .parse()
-                    .ok()?;
+                let modified: u64 = stdout_of(runner, "stat", &["-f", "%m", &plist]).ok()?.parse().ok()?;
                 let info = format!("{bundle}/Contents/Info");
                 let version = match read_pref(runner, &info, "CFBundleShortVersionString") {
                     Pref::Value(version) => version,
@@ -542,20 +523,14 @@ mod tests {
     #[test]
     fn fails_when_sip_and_gatekeeper_are_disabled() {
         let runner = MockRunner::new()
-            .ok(
-                "csrutil status",
-                "System Integrity Protection status: disabled.",
-            )
+            .ok("csrutil status", "System Integrity Protection status: disabled.")
             // `spctl --status` exits with code 1 when assessments are disabled.
             .fail_stdout("spctl --status", "assessments disabled");
         assert_eq!(Sip.run(&runner).status, Status::Fail);
         assert_eq!(Gatekeeper.run(&runner).status, Status::Fail);
 
         let enabled = MockRunner::new()
-            .ok(
-                "csrutil status",
-                "System Integrity Protection status: enabled.",
-            )
+            .ok("csrutil status", "System Integrity Protection status: enabled.")
             .ok("spctl --status", "assessments enabled");
         assert_eq!(Sip.run(&enabled).status, Status::Pass);
         assert_eq!(Gatekeeper.run(&enabled).status, Status::Pass);

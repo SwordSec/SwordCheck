@@ -20,7 +20,15 @@ pub fn get(url: &str, headers: &[String]) -> Result<String, String> {
 /// `POST url` with a JSON body. The body is passed on stdin: a request that
 /// covers thousands of packages could exceed the command line length limit.
 pub fn post_json(url: &str, body: &str) -> Result<String, String> {
-    let args = ["--max-time", "60", "--header", "Content-Type: application/json", "--data-binary", "@-", url];
+    let args = [
+        "--max-time",
+        "60",
+        "--header",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        url,
+    ];
     run_curl(&args, Some(body))
 }
 
@@ -48,7 +56,9 @@ pub fn run_curl(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
         (Some(input), Some(mut pipe)) => pipe.write_all(input.as_bytes()),
         _ => Ok(()),
     };
-    let output = child.wait_with_output().map_err(|err| format!("could not wait for `curl`: {err}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("could not wait for `curl`: {err}"))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
         return Err(message.lines().last().unwrap_or("curl failed").trim().to_string());

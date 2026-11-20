@@ -1,5 +1,8 @@
 # SwordCheck
 
+[![CI](https://github.com/SwordSec/SwordCheck/actions/workflows/ci.yml/badge.svg)](https://github.com/SwordSec/SwordCheck/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 A security check-up for your computer, by [SwordSec](https://swordsec.com).
 It runs on macOS today; Linux and Windows are planned.
 
@@ -12,6 +15,21 @@ config files.
 The tool is **read-only**: it never changes a setting on your Mac. For every
 problem it explains what to do, and where a single command does the job it
 shows that command for you to run yourself.
+
+## Install
+
+SwordCheck needs macOS and a Rust toolchain (1.88 or newer, from
+[rustup.rs](https://rustup.rs)). Build it from source:
+
+```sh
+git clone https://github.com/SwordSec/SwordCheck.git
+cd SwordCheck
+cargo install --path .
+```
+
+That puts `swordcheck` in `~/.cargo/bin`. The examples below use
+`cargo run --`, which works straight from the checkout; with the installed
+binary, write `swordcheck` instead.
 
 ## Usage
 
@@ -337,9 +355,13 @@ be tested against canned output with `MockRunner`.
 
 ## Notes
 
-- The CIS column refers to the matching section of the CIS Apple macOS
-  Benchmark. Section numbers change between benchmark versions; compare with
-  the version you use before relying on them in a compliance report.
+- The CIS column refers to the matching section of the *CIS Apple macOS 26.0
+  Tahoe Benchmark v1.1.0*, as mapped by NIST's
+  [macOS Security Compliance Project](https://github.com/usnistgov/macos_security).
+  `sharing` covers several subsections of 2.3.3 (screen sharing, file sharing,
+  remote management). Section numbers change between benchmark versions;
+  compare with the version you use before relying on them in a compliance
+  report. SwordCheck is not a CIS-certified tool.
 - `launch-items` uses simple heuristics (programs running from temporary or
   hidden directories, download-and-execute, etc.); a warning is not a verdict.
 - This tool covers baseline configuration checks. It is not a replacement for

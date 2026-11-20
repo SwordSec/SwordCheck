@@ -36,11 +36,7 @@ struct Incident {
     note: &'static str,
 }
 
-const fn incident(
-    name: &'static str,
-    versions: &'static [&'static str],
-    note: &'static str,
-) -> Incident {
+const fn incident(name: &'static str, versions: &'static [&'static str], note: &'static str) -> Incident {
     Incident { name, versions, note }
 }
 
@@ -53,28 +49,66 @@ const TYPOSQUAT: &str = "typosquat (steals environment variables)";
 /// Known incidents. The list is not exhaustive; it contains widespread and
 /// well-documented cases. Use `--online` for up-to-date coverage.
 const KNOWN: &[Incident] = &[
-    incident("event-stream", &["3.3.6"], "2018 flatmap-stream backdoor (wallet stealer)"),
-    incident("flatmap-stream", &[], "malicious dependency of the 2018 event-stream attack"),
+    incident(
+        "event-stream",
+        &["3.3.6"],
+        "2018 flatmap-stream backdoor (wallet stealer)",
+    ),
+    incident(
+        "flatmap-stream",
+        &[],
+        "malicious dependency of the 2018 event-stream attack",
+    ),
     incident("eslint-scope", &["3.7.2"], "2018 npm token stealer"),
     incident("eslint-config-eslint", &["5.0.2"], "2018 npm token stealer"),
-    incident("ua-parser-js", &["0.7.29", "0.8.0", "1.0.0"], "2021 compromise (miner + password stealer)"),
-    incident("coa", &["2.0.3", "2.0.4", "2.1.1", "2.1.3", "3.0.1", "3.1.3"], "2021 compromise (password stealer)"),
+    incident(
+        "ua-parser-js",
+        &["0.7.29", "0.8.0", "1.0.0"],
+        "2021 compromise (miner + password stealer)",
+    ),
+    incident(
+        "coa",
+        &["2.0.3", "2.0.4", "2.1.1", "2.1.3", "3.0.1", "3.1.3"],
+        "2021 compromise (password stealer)",
+    ),
     incident("rc", &["1.2.9", "1.3.9", "2.3.9"], "2021 compromise (password stealer)"),
     incident("node-ipc", &["10.1.1", "10.1.2"], "2022 protestware (file wiper)"),
     incident("peacenotwar", &[], "2022 protestware (writes a file to the desktop)"),
-    incident("colors", &["1.4.1", "1.4.2", "1.4.44-liberty-2"], "2022 sabotage (infinite loop)"),
+    incident(
+        "colors",
+        &["1.4.1", "1.4.2", "1.4.44-liberty-2"],
+        "2022 sabotage (infinite loop)",
+    ),
     incident("faker", &["6.6.6"], "2022 sabotage (gutted release)"),
-    incident("@solana/web3.js", &["1.95.6", "1.95.7"], "December 2024 compromise (private key stealer)"),
-    incident("@lottiefiles/lottie-player", &["2.0.5", "2.0.6", "2.0.7"], "October 2024 compromise (wallet drainer)"),
+    incident(
+        "@solana/web3.js",
+        &["1.95.6", "1.95.7"],
+        "December 2024 compromise (private key stealer)",
+    ),
+    incident(
+        "@lottiefiles/lottie-player",
+        &["2.0.5", "2.0.6", "2.0.7"],
+        "October 2024 compromise (wallet drainer)",
+    ),
     incident("@rspack/core", &["1.1.7"], RSPACK),
     incident("@rspack/cli", &["1.1.7"], RSPACK),
     incident(
         "vant",
-        &["2.13.3", "2.13.4", "2.13.5", "3.6.13", "3.6.14", "3.6.15", "4.9.11", "4.9.12", "4.9.13", "4.9.14"],
+        &[
+            "2.13.3", "2.13.4", "2.13.5", "3.6.13", "3.6.14", "3.6.15", "4.9.11", "4.9.12", "4.9.13", "4.9.14",
+        ],
         RSPACK,
     ),
-    incident("xrpl", &["2.14.2", "4.2.1", "4.2.2", "4.2.3", "4.2.4"], "April 2025 compromise (private key stealer)"),
-    incident("eslint-config-prettier", &["8.10.1", "9.1.1", "10.1.6", "10.1.7"], SCAVENGER),
+    incident(
+        "xrpl",
+        &["2.14.2", "4.2.1", "4.2.2", "4.2.3", "4.2.4"],
+        "April 2025 compromise (private key stealer)",
+    ),
+    incident(
+        "eslint-config-prettier",
+        &["8.10.1", "9.1.1", "10.1.6", "10.1.7"],
+        SCAVENGER,
+    ),
     incident("eslint-plugin-prettier", &["4.2.2", "4.2.3"], SCAVENGER),
     incident("synckit", &["0.11.9"], SCAVENGER),
     incident("@pkgr/core", &["0.2.8"], SCAVENGER),
@@ -83,7 +117,9 @@ const KNOWN: &[Incident] = &[
     incident("is", &["3.3.1", "5.0.0"], SCAVENGER),
     incident(
         "nx",
-        &["20.9.0", "20.10.0", "20.11.0", "20.12.0", "21.5.0", "21.6.0", "21.7.0", "21.8.0"],
+        &[
+            "20.9.0", "20.10.0", "20.11.0", "20.12.0", "21.5.0", "21.6.0", "21.7.0", "21.8.0",
+        ],
         NX,
     ),
     incident("chalk", &["5.6.1"], CHALK_DEBUG),
@@ -105,9 +141,21 @@ const KNOWN: &[Incident] = &[
     incident("is-arrayish", &["0.3.3"], CHALK_DEBUG),
     incident("error-ex", &["1.3.3"], CHALK_DEBUG),
     incident("backslash", &["0.2.1"], CHALK_DEBUG),
-    incident("@ctrl/tinycolor", &["4.1.1", "4.1.2"], "September 2025 Shai-Hulud worm (token stealer)"),
-    incident("axios", &["1.14.1", "0.30.4"], "March 2026 compromise (remote access trojan)"),
-    incident("plain-crypto-js", &[], "malicious dependency of the March 2026 axios attack"),
+    incident(
+        "@ctrl/tinycolor",
+        &["4.1.1", "4.1.2"],
+        "September 2025 Shai-Hulud worm (token stealer)",
+    ),
+    incident(
+        "axios",
+        &["1.14.1", "0.30.4"],
+        "March 2026 compromise (remote access trojan)",
+    ),
+    incident(
+        "plain-crypto-js",
+        &[],
+        "malicious dependency of the March 2026 axios attack",
+    ),
     incident("crossenv", &[], TYPOSQUAT),
     incident("cross-env.js", &[], TYPOSQUAT),
     incident("mongose", &[], TYPOSQUAT),
@@ -208,9 +256,7 @@ impl Scan {
     pub fn add_osv(&mut self, hits: Vec<OsvHit>) {
         for hit in hits {
             let already_known = self.findings.iter().any(|finding| {
-                finding.kind == Kind::Known
-                    && finding.package == hit.package
-                    && finding.version == hit.version
+                finding.kind == Kind::Known && finding.package == hit.package && finding.version == hit.version
             });
             if already_known {
                 continue;
@@ -387,8 +433,7 @@ fn known_incident(name: &str, version: &str) -> Option<&'static str> {
     KNOWN
         .iter()
         .find(|incident| {
-            incident.name == name
-                && (incident.versions.is_empty() || incident.versions.contains(&version))
+            incident.name == name && (incident.versions.is_empty() || incident.versions.contains(&version))
         })
         .map(|incident| incident.note)
 }
@@ -449,17 +494,32 @@ fn home() -> Option<PathBuf> {
 /// Global install directories: npm, pnpm, yarn, bun, version managers and
 /// the `npx` cache. Only the ones that exist are returned.
 pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
+    global_roots_checked(runner).0
+}
+
+/// Like `global_roots`, and also says why npm's own global directory could
+/// not be determined, if `npm` is installed but did not answer. The fixed
+/// locations are still returned then; a custom `prefix` would be missed.
+pub fn global_roots_checked(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option<String>) {
+    let mut problem = None;
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("/opt/homebrew/lib/node_modules"),
         PathBuf::from("/usr/local/lib/node_modules"),
     ];
 
     // If a custom `prefix` is set, the fixed paths above are not enough.
-    if let Ok(out) = runner.run("npm", &["root", "-g"])
-        && out.success
-        && !out.stdout.is_empty()
-    {
-        candidates.push(PathBuf::from(out.stdout));
+    match runner.run("npm", &["root", "-g"]) {
+        Ok(out) if out.success && !out.stdout.is_empty() => candidates.push(PathBuf::from(out.stdout)),
+        Ok(out) => {
+            problem = Some(format!(
+                "`npm root -g` failed: {}",
+                out.combined().lines().next().unwrap_or("no output")
+            ))
+        }
+        // The command could not be started: npm is not installed, which is
+        // not a problem. Anything else (a timeout) is.
+        Err(err) if err.contains("could not run") => {}
+        Err(err) => problem = Some(err),
     }
 
     if let Some(home) = home() {
@@ -485,7 +545,7 @@ pub fn global_roots(runner: &dyn CommandRunner) -> Vec<PathBuf> {
         }
     }
 
-    unique_dirs(candidates)
+    (unique_dirs(candidates), problem)
 }
 
 /// Global directories + the `node_modules` directories of projects in the
@@ -579,15 +639,16 @@ pub fn osv_lookup(installed: &Installed) -> Result<Vec<OsvHit>, String> {
 /// Like `osv_lookup`, reporting each batch.
 pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> Result<Vec<OsvHit>, String> {
     // Packages without a version (e.g. installed from git) cannot be queried.
-    let packages: Vec<&(String, String)> = installed
-        .keys()
-        .filter(|(_, version)| !version.is_empty())
-        .collect();
+    let packages: Vec<&(String, String)> = installed.keys().filter(|(_, version)| !version.is_empty()).collect();
 
     progress.stage(format!("Asking OSV.dev about {} package versions", packages.len()));
     let queries: Vec<osv::Query> = packages
         .iter()
-        .map(|(name, version)| osv::Query { ecosystem: "npm", name, version })
+        .map(|(name, version)| osv::Query {
+            ecosystem: "npm",
+            name,
+            version,
+        })
         .collect();
     let results = osv::query(&queries, |done, total| progress.step(done, total))?;
     Ok(malware_hits(&packages, results))
@@ -600,8 +661,16 @@ fn malware_hits(packages: &[&(String, String)], results: Vec<Vec<osv::Vuln>>) ->
         .iter()
         .zip(results)
         .filter_map(|((name, version), vulns)| {
-            let ids: Vec<String> = vulns.into_iter().map(|vuln| vuln.id).filter(|id| id.starts_with("MAL-")).collect();
-            (!ids.is_empty()).then(|| OsvHit { package: name.clone(), version: version.clone(), ids })
+            let ids: Vec<String> = vulns
+                .into_iter()
+                .map(|vuln| vuln.id)
+                .filter(|id| id.starts_with("MAL-"))
+                .collect();
+            (!ids.is_empty()).then(|| OsvHit {
+                package: name.clone(),
+                version: version.clone(),
+                ids,
+            })
         })
         .collect()
 }
@@ -664,13 +733,13 @@ impl NpmReport {
             } else {
                 label.yellow().bold()
             };
-            let version = if finding.version.is_empty() { "?" } else { &finding.version };
+            let version = if finding.version.is_empty() {
+                "?"
+            } else {
+                &finding.version
+            };
             let _ = writeln!(out);
-            let _ = writeln!(
-                out,
-                "{label} {}",
-                format!("{}@{version}", finding.package).bold()
-            );
+            let _ = writeln!(out, "{label} {}", format!("{}@{version}", finding.package).bold());
             let _ = writeln!(out, "    {}", finding.reason);
             for path in &finding.paths {
                 let _ = writeln!(out, "    {}", path.display().to_string().dimmed());
@@ -686,11 +755,7 @@ impl NpmReport {
         let _ = writeln!(out);
         let _ = writeln!(out, "{rule}");
         if malware > 0 {
-            let _ = writeln!(
-                out,
-                "{}",
-                format!("{malware} malicious packages found.").red().bold()
-            );
+            let _ = writeln!(out, "{}", format!("{malware} malicious packages found.").red().bold());
             let _ = writeln!(
                 out,
                 "Remove the package or move to a clean version, delete and reinstall `node_modules`,\n\
@@ -808,7 +873,10 @@ mod tests {
         // A malicious version nested under another package.
         temp.package("node_modules/express/node_modules/debug", pkg("debug", "4.4.2"));
         temp.package("node_modules/@ctrl/tinycolor", pkg("@ctrl/tinycolor", "4.1.1"));
-        temp.package("node_modules/.pnpm/chalk@5.6.1/node_modules/chalk", pkg("chalk", "5.6.1"));
+        temp.package(
+            "node_modules/.pnpm/chalk@5.6.1/node_modules/chalk",
+            pkg("chalk", "5.6.1"),
+        );
         temp.package("node_modules/.bin/ignored", pkg("event-stream", "3.3.6"));
 
         let scan = scan(&[temp.0.join("node_modules")]);
@@ -878,7 +946,28 @@ mod tests {
 
         // If the path itself is a node_modules it is used as is.
         let direct = temp.0.join("app/node_modules");
-        assert_eq!(roots_under(&direct), [direct.clone()]);
+        assert_eq!(roots_under(&direct), std::slice::from_ref(&direct));
+    }
+
+    #[test]
+    fn a_silent_npm_is_reported_but_a_missing_one_is_not() {
+        use crate::runner::MockRunner;
+        const ROOT: &str = "npm root -g";
+
+        let failed = MockRunner::new().fail(ROOT, "npm ERR! config prefix is broken\nmore");
+        assert_eq!(
+            global_roots_checked(&failed).1.as_deref(),
+            Some("`npm root -g` failed: npm ERR! config prefix is broken")
+        );
+
+        let timed_out = MockRunner::new().error(ROOT, "`npm` did not finish within 20 seconds");
+        assert!(global_roots_checked(&timed_out).1.is_some());
+
+        let missing = MockRunner::new().error(ROOT, "could not run `npm`: No such file or directory (os error 2)");
+        assert_eq!(global_roots_checked(&missing).1, None, "no npm, nothing to report");
+
+        let fine = MockRunner::new().ok(ROOT, "/nonexistent/lib/node_modules");
+        assert_eq!(global_roots_checked(&fine).1, None);
     }
 
     #[test]
@@ -899,8 +988,15 @@ mod tests {
         let c = ("vulnerable".to_string(), "3.0.0".to_string());
         let packages = [&a, &b, &c];
 
-        let vuln = |id: &str| osv::Vuln { id: id.to_string(), modified: "x".to_string() };
-        let results = vec![vec![], vec![vuln("GHSA-xxxx"), vuln("MAL-2025-1")], vec![vuln("GHSA-yyyy")]];
+        let vuln = |id: &str| osv::Vuln {
+            id: id.to_string(),
+            modified: "x".to_string(),
+        };
+        let results = vec![
+            vec![],
+            vec![vuln("GHSA-xxxx"), vuln("MAL-2025-1")],
+            vec![vuln("GHSA-yyyy")],
+        ];
         assert_eq!(
             malware_hits(&packages, results),
             [OsvHit {

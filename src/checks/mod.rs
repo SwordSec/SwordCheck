@@ -259,11 +259,7 @@ fn build_result(check: &dyn Check, outcome: Outcome, config: &Config) -> CheckRe
 /// `std::thread::scope` lets the threads borrow local data such as `checks`,
 /// `runner` and `config`: all threads are guaranteed to have finished before
 /// the scope ends.
-pub fn run_checks(
-    checks: &[Box<dyn Check>],
-    runner: &dyn CommandRunner,
-    config: &Config,
-) -> Vec<CheckResult> {
+pub fn run_checks(checks: &[Box<dyn Check>], runner: &dyn CommandRunner, config: &Config) -> Vec<CheckResult> {
     run_checks_with(checks, runner, config, &Progress::none())
 }
 
@@ -339,9 +335,7 @@ fn read_pref(runner: &dyn CommandRunner, domain: &str, key: &str) -> Pref {
         Err(err) => Pref::Error(err),
         Ok(out) if out.success => Pref::Value(out.stdout),
         // Older macOS says "does not exist"; newer releases say "Could not find key".
-        Ok(out) if out.stderr.contains("does not exist") || out.stderr.contains("Could not find") => {
-            Pref::Missing
-        }
+        Ok(out) if out.stderr.contains("does not exist") || out.stderr.contains("Could not find") => Pref::Missing,
         Ok(out) => Pref::Error(out.combined()),
     }
 }
@@ -412,8 +406,8 @@ fn listeners(netstat_output: &str) -> Result<Vec<Listener>, String> {
             continue;
         }
 
-        let socket = parse_socket_line(&fields)
-            .ok_or_else(|| format!("Unrecognised netstat line: {}", one_line(line)))?;
+        let socket =
+            parse_socket_line(&fields).ok_or_else(|| format!("Unrecognised netstat line: {}", one_line(line)))?;
         recognised = true;
         found.extend(socket);
     }
@@ -423,10 +417,7 @@ fn listeners(netstat_output: &str) -> Result<Vec<Listener>, String> {
     } else if netstat_output.trim().is_empty() {
         Err("netstat produced no output.".to_string())
     } else {
-        Err(format!(
-            "Unrecognised netstat output: {}",
-            one_line(netstat_output)
-        ))
+        Err(format!("Unrecognised netstat output: {}", one_line(netstat_output)))
     }
 }
 
@@ -487,16 +478,53 @@ fn netstat(runner: &dyn CommandRunner) -> Result<String, String> {
     stdout_of(runner, "netstat", &["-an", "-p", "tcp"])
 }
 
+/// Listening sockets that belong to the current user, from `lsof`.
+///
+/// Without root `lsof` cannot see other users' sockets (the system `sshd`
+/// socket is held by launchd), so this complements the launchd lookup: it
+/// catches a server the user started themselves, such as a Homebrew `sshd`.
+/// Any problem running `lsof` gives an empty list rather than an error.
+fn own_listeners(runner: &dyn CommandRunner) -> Vec<Listener> {
+    // `lsof` exits with 1 when nothing matches, so the exit code is ignored.
+    let Ok(out) = runner.run("lsof", &["-nP", "-iTCP", "-sTCP:LISTEN"]) else {
+        return Vec::new();
+    };
+    out.stdout.lines().filter_map(parse_lsof_line).collect()
+}
+
+/// A line looks like this:
+/// `sshd 812 alice 7u IPv4 0x… 0t0 TCP *:22 (LISTEN)`
+fn parse_lsof_line(line: &str) -> Option<Listener> {
+    let mut fields = line.split_whitespace().rev();
+    if fields.next()? != "(LISTEN)" {
+        return None;
+    }
+    let (host, port) = fields.next()?.rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Some(Listener {
+        port: port.parse().ok()?,
+        loopback: is_loopback(host),
+    })
+}
+
 /// A system service that launchd starts on demand.
 struct Daemon {
     label: &'static str,
     plist: &'static str,
 }
 
-const SSHD: Daemon = Daemon { label: "com.openssh.sshd", plist: "/System/Library/LaunchDaemons/ssh.plist" };
-const SCREEN_SHARING: Daemon =
-    Daemon { label: "com.apple.screensharing", plist: "/System/Library/LaunchDaemons/com.apple.screensharing.plist" };
-const FILE_SHARING: Daemon = Daemon { label: "com.apple.smbd", plist: "/System/Library/LaunchDaemons/com.apple.smbd.plist" };
+const SSHD: Daemon = Daemon {
+    label: "com.openssh.sshd",
+    plist: "/System/Library/LaunchDaemons/ssh.plist",
+};
+const SCREEN_SHARING: Daemon = Daemon {
+    label: "com.apple.screensharing",
+    plist: "/System/Library/LaunchDaemons/com.apple.screensharing.plist",
+};
+const FILE_SHARING: Daemon = Daemon {
+    label: "com.apple.smbd",
+    plist: "/System/Library/LaunchDaemons/com.apple.smbd.plist",
+};
 
 /// Is the service switched on in launchd?
 ///
@@ -530,7 +558,11 @@ fn daemon_enabled(runner: &dyn CommandRunner, daemon: &Daemon) -> Result<bool, S
     match (default.success, default.stdout.trim()) {
         (true, "true") => Ok(false),
         (true, "false") => Ok(true),
-        _ => Err(format!("Could not read the default state of {}: {}", daemon.label, one_line(&default.combined()))),
+        _ => Err(format!(
+            "Could not read the default state of {}: {}",
+            daemon.label,
+            one_line(&default.combined())
+        )),
     }
 }
 
@@ -557,8 +589,14 @@ tcp4       0      0  127.0.0.1.5000         *.*                    LISTEN";
         assert_eq!(
             listeners(sample).unwrap(),
             [
-                Listener { port: 22, loopback: false },
-                Listener { port: 5000, loopback: true },
+                Listener {
+                    port: 22,
+                    loopback: false
+                },
+                Listener {
+                    port: 5000,
+                    loopback: true
+                },
             ]
         );
     }
@@ -599,10 +637,25 @@ tcp4       0      0  *.*                    *.*                    CLOSED";
 
     #[test]
     fn loopback_addresses() {
-        for host in ["127.0.0.1", "127.255.0.3", "::1", "::ffff:127.0.0.1", "fe80::1%lo0", "localhost"] {
+        for host in [
+            "127.0.0.1",
+            "127.255.0.3",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fe80::1%lo0",
+            "localhost",
+        ] {
             assert!(is_loopback(host), "{host}");
         }
-        for host in ["*", "10.0.0.5", "192.168.127.1", "1127.0.0.1", "::", "fe80::1%en0", "2001:db8::1"] {
+        for host in [
+            "*",
+            "10.0.0.5",
+            "192.168.127.1",
+            "1127.0.0.1",
+            "::",
+            "fe80::1%en0",
+            "2001:db8::1",
+        ] {
             assert!(!is_loopback(host), "{host}");
         }
     }
@@ -696,9 +749,7 @@ Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)";
         let runner = MockRunner::new().ok("fdesetup status", "FileVault is Off.");
         let mut config = Config::default();
         config.weights.insert("filevault".into(), 40);
-        config
-            .exceptions
-            .insert("filevault".into(), "test machine".into());
+        config.exceptions.insert("filevault".into(), "test machine".into());
 
         let result = run_one(&system::FileVault, &runner, &config);
         assert_eq!(result.status, Status::Fail);
@@ -770,9 +821,6 @@ Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)";
             args: &["write", "x", "Contacts Only"],
             sudo: true,
         };
-        assert_eq!(
-            fix.command_line(),
-            "sudo defaults write x \"Contacts Only\""
-        );
+        assert_eq!(fix.command_line(), "sudo defaults write x \"Contacts Only\"");
     }
 }

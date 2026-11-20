@@ -142,11 +142,7 @@ pub mod tests {
     fn unknown_and_exempt_stay_out_of_denominator() {
         let mut exempt = result("c", Status::Fail, 50);
         exempt.exempt = Some("reason".into());
-        let results = [
-            result("a", Status::Pass, 10),
-            result("b", Status::Unknown, 90),
-            exempt,
-        ];
+        let results = [result("a", Status::Pass, 10), result("b", Status::Unknown, 90), exempt];
         assert_eq!(calculate_score(&results), 100);
     }
 

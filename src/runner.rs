@@ -135,8 +135,7 @@ fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<C
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
 
-    let timed_out =
-        || format!("`{program}` did not finish within {} seconds", timeout.as_secs_f32());
+    let timed_out = || format!("`{program}` did not finish within {} seconds", timeout.as_secs_f32());
     let deadline = Instant::now() + timeout;
 
     let status = loop {
@@ -211,12 +210,12 @@ impl MockRunner {
     }
 
     /// Defines a successful (exit code 0) command.
-    pub fn ok(mut self, command: &str, stdout: &str) -> Self {
+    pub fn ok(self, command: &str, stdout: &str) -> Self {
         self.respond(command, stdout, "", true)
     }
 
     /// Defines a failing command; the message is treated as written to stderr.
-    pub fn fail(mut self, command: &str, stderr: &str) -> Self {
+    pub fn fail(self, command: &str, stderr: &str) -> Self {
         self.respond(command, "", stderr, false)
     }
 
@@ -229,8 +228,7 @@ impl MockRunner {
     /// Defines a command that yields no result at all (could not be started
     /// or timed out).
     pub fn error(mut self, command: &str, message: &str) -> Self {
-        self.responses
-            .insert(command.to_string(), Err(message.to_string()));
+        self.responses.insert(command.to_string(), Err(message.to_string()));
         self
     }
 
@@ -247,7 +245,7 @@ impl MockRunner {
     }
 
     /// Defines a command that succeeds but writes its output to stderr.
-    pub fn ok_stderr(mut self, command: &str, stderr: &str) -> Self {
+    pub fn ok_stderr(self, command: &str, stderr: &str) -> Self {
         self.respond(command, "", stderr, true)
     }
 }
@@ -282,10 +280,7 @@ mod tests {
         assert_eq!(output("", "", true).into_stdout(), Ok(String::new()));
 
         // A failure stays a failure even when something was printed.
-        assert_eq!(
-            output("partial", "boom", false).into_stdout(),
-            Err("boom".to_string())
-        );
+        assert_eq!(output("partial", "boom", false).into_stdout(), Err("boom".to_string()));
         let err = output("only stdout", "", false).into_stdout().unwrap_err();
         assert!(err.contains("only stdout"), "{err}");
         assert!(output("", "", false).into_stdout().is_err());
@@ -325,7 +320,10 @@ mod tests {
         let started = Instant::now();
         let err = runner.run("/bin/sleep", &["30"]).unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(10), "the command was not killed");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the command was not killed"
+        );
 
         // The timeout is cached like any other result.
         let again = Instant::now();

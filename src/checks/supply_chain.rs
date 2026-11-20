@@ -27,11 +27,22 @@ impl Check for NpmPackages {
     }
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
-        let roots = npm::global_roots(runner);
-        if roots.is_empty() {
-            return Outcome::pass("No global npm install directory found; no packages to scan.");
+        let (roots, problem) = npm::global_roots_checked(runner);
+        match (roots.is_empty(), problem) {
+            // npm is there but would not say where it installs: nothing was
+            // scanned, so there is no verdict.
+            (true, Some(problem)) => Outcome::unknown(format!("Global npm packages could not be located: {problem}")),
+            (true, None) => Outcome::pass("No global npm install directory found; no packages to scan."),
+            (false, problem) => {
+                let mut outcome = outcome(&npm::scan(&roots));
+                if let Some(problem) = problem {
+                    outcome
+                        .detail
+                        .push_str(&format!(" Note: {problem}; a custom npm prefix was not scanned."));
+                }
+                outcome
+            }
         }
-        outcome(&npm::scan(&roots))
     }
 }
 
@@ -72,8 +83,7 @@ mod tests {
 
     /// Sets up a temporary `node_modules` and scans it.
     fn scan_fixture(label: &str, manifest: serde_json::Value) -> npm::Scan {
-        let root: PathBuf = std::env::temp_dir()
-            .join(format!("swordcheck-supply-{label}-{}", std::process::id()));
+        let root: PathBuf = std::env::temp_dir().join(format!("swordcheck-supply-{label}-{}", std::process::id()));
         let package = root.join("node_modules/pkg");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(package.join("package.json"), manifest.to_string()).unwrap();
