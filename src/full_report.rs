@@ -75,9 +75,22 @@ impl FullReport {
 
     /// Did an online lookup fail, so that something may be missing?
     pub fn incomplete(&self) -> bool {
-        !self.vulns.warnings.is_empty()
-            || matches!(self.npm_lookup, Some(Err(_)))
-            || self.secrets.git_unknown().next().is_some()
+        !self.gaps().is_empty()
+    }
+
+    /// Why something may be missing, in words for the page.
+    fn gaps(&self) -> Vec<&'static str> {
+        let mut gaps = Vec::new();
+        if !self.vulns.warnings.is_empty() {
+            gaps.push("a vulnerability lookup failed");
+        }
+        if matches!(self.npm_lookup, Some(Err(_))) {
+            gaps.push("the OSV lookup for npm packages failed");
+        }
+        if self.secrets.git_unknown().next().is_some() {
+            gaps.push("git could not tell whether a file with a secret is tracked");
+        }
+        gaps
     }
 
     pub fn to_html(&self) -> String {
@@ -257,17 +270,27 @@ impl FullReport {
         );
 
         out.push_str("<div class=\"panel todo\">\n<h2>Fix these first</h2>\n");
-        if priorities.is_empty() && self.incomplete() {
-            out.push_str(
-                "<p>No urgent finding in what could be checked, but an online lookup failed, so this list may be \
-                 incomplete: see the notes below.</p>\n",
+        // Whether the list is empty or not, say what it may be missing.
+        let gaps = self.gaps().join("; ");
+        if priorities.is_empty() && !gaps.is_empty() {
+            let _ = writeln!(
+                out,
+                "<p>No urgent finding in what could be checked, but this list may be incomplete: {gaps}. \
+                 See the notes below.</p>"
             );
         } else if priorities.is_empty() {
             out.push_str(
                 "<p>Nothing urgent: no failing check, malware, known-exploited vulnerability or secret in a git-tracked file.</p>\n",
             );
         } else {
-            out.push_str("<p>Ordered by risk across every scan.</p>\n<ol>\n");
+            out.push_str("<p>Ordered by risk across every scan.</p>\n");
+            if !gaps.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "<p class=\"note warn\">This list may be incomplete: {gaps}. See the notes below.</p>"
+                );
+            }
+            out.push_str("<ol>\n");
             for priority in priorities.iter().take(MAX_PRIORITIES) {
                 let _ = writeln!(
                     out,
@@ -1527,6 +1550,41 @@ mod tests {
     }
 
     #[test]
+    fn fix_first_names_every_gap_even_with_entries() {
+        // A failing setting puts one entry in the list; a failed lookup must
+        // still be mentioned there.
+        let mut report = empty(audit(vec![result("firewall", Status::Fail, 20)], None));
+        report.online = true;
+        report.vulns.warnings = vec!["CISA KEV download failed: timeout".into()];
+        let html = report.to_html();
+        assert!(html.contains(
+            "<p class=\"note warn\">This list may be incomplete: a vulnerability lookup failed. See the notes below.</p>"
+        ));
+        assert!(html.contains("<strong>firewall</strong>"));
+
+        // Only the git status is unknown: name git, not an online lookup.
+        let temp = TempDir::new("gaps");
+        std::fs::write(
+            temp.0.join(".env"),
+            format!("DATABASE_URL=postgres://app:{}@db.prod.internal/app\n", password(11)),
+        )
+        .unwrap();
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.secrets = secrets::scan(&secrets::files_under(&temp.0));
+        report.secrets.findings[0].git_unknown = true;
+        let html = report.to_html();
+        assert!(
+            html.contains("this list may be incomplete: git could not tell whether a file with a secret is tracked.")
+        );
+        assert!(!html.contains("lookup failed"));
+
+        // Nothing missing: no note.
+        report.secrets.findings[0].git_unknown = false;
+        report.secrets.findings[0].git_tracked = false;
+        assert!(!report.to_html().contains("may be incomplete"));
+    }
+
+    #[test]
     fn unread_npm_packages_get_their_own_tag_and_advice() {
         let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
         report.npm.findings = vec![npm_finding(npm::Kind::Unread, "event-stream", "", 1)];
@@ -1672,7 +1730,7 @@ mod tests {
         for text in [
             "<a href=\"#vulns\">Vulnerabilities <b class=\"warn\">incomplete</b>",
             "<a href=\"#npm\">npm <b class=\"warn\">incomplete</b>",
-            "an online lookup failed, so this list may be incomplete",
+            "this list may be incomplete: a vulnerability lookup failed; the OSV lookup for npm packages failed.",
             "the failed lookups above may hide findings",
             "packages known only to OSV.dev were not checked",
         ] {
