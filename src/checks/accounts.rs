@@ -24,20 +24,21 @@ impl Check for AutoLogin {
     fn cis(&self) -> Option<&'static str> {
         Some("2.12.3")
     }
-    fn fix(&self) -> Option<Fix> {
-        Some(Fix {
-            program: "defaults",
-            args: &["delete", LOGIN_WINDOW, "autoLoginUser"],
-            sudo: true,
-        })
-    }
+    // No suggested command: deleting the `autoLoginUser` preference with
+    // `defaults` stops the automatic login but leaves /etc/kcpassword on
+    // disk, and that file holds the login password XOR-ed with a fixed,
+    // publicly known key. Turning the option off in System Settings removes
+    // both, so the advice text points there.
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
         match read_pref(runner, LOGIN_WINDOW, "autoLoginUser") {
             // If the key exists a user name is returned: automatic login is on.
             Pref::Value(user) if !user.is_empty() => Outcome::fail(
                 format!("User '{user}' logs in automatically without a password."),
-                "Turn off automatic login in System Settings > Users & Groups.",
+                "Open System Settings > Users & Groups and set \"Automatically log in as\" to \"Off\". \
+                 Do it there rather than by deleting the preference: System Settings also removes \
+                 /etc/kcpassword, a file that stores the login password in an easily reversible form. \
+                 Afterwards `sudo ls /etc/kcpassword` should say \"No such file or directory\".",
             ),
             // If the key is missing, automatic login is already off.
             Pref::Value(_) | Pref::Missing => Outcome::pass("Automatic login is off."),
@@ -77,9 +78,15 @@ impl Check for GuestAccount {
         match read_pref(runner, LOGIN_WINDOW, "GuestEnabled") {
             Pref::Value(value) if value == "1" => Outcome::fail(
                 "The guest account is enabled.",
-                "Turn off Guest User in System Settings > Users & Groups.",
+                "In System Settings > Users & Groups, click the (i) button next to Guest User and turn off \
+                 \"Allow guests to log in to this computer\".",
             ),
-            Pref::Value(_) | Pref::Missing => Outcome::pass("The guest account is disabled."),
+            // If the key is missing the guest account was never enabled.
+            Pref::Value(value) if value == "0" => Outcome::pass("The guest account is disabled."),
+            Pref::Missing => Outcome::pass("The guest account is disabled."),
+            Pref::Value(value) => {
+                Outcome::unknown(format!("Unexpected value for GuestEnabled: {value:?}"))
+            }
             Pref::Error(err) => Outcome::unknown(err),
         }
     }
@@ -231,6 +238,18 @@ mod tests {
     }
 
     #[test]
+    fn automatic_login_guidance_covers_kcpassword() {
+        // Deleting the preference alone would leave the obfuscated password
+        // on disk, so there is no one-command suggestion.
+        assert!(AutoLogin.fix().is_none());
+
+        let cmd = format!("defaults read {LOGIN_WINDOW} autoLoginUser");
+        let advice = AutoLogin.run(&MockRunner::new().ok(&cmd, "alice")).advice;
+        assert!(advice.contains("System Settings > Users & Groups"));
+        assert!(advice.contains("/etc/kcpassword"));
+    }
+
+    #[test]
     fn guest_account() {
         let cmd = format!("defaults read {LOGIN_WINDOW} GuestEnabled");
         assert_eq!(
@@ -240,6 +259,19 @@ mod tests {
         assert_eq!(
             GuestAccount.run(&MockRunner::new().ok(&cmd, "0")).status,
             Status::Pass
+        );
+        assert_eq!(
+            GuestAccount.run(&MockRunner::new().fail(&cmd, MISSING)).status,
+            Status::Pass
+        );
+        // Empty or unexpected output is not "disabled".
+        assert_eq!(
+            GuestAccount.run(&MockRunner::new().ok(&cmd, "")).status,
+            Status::Unknown
+        );
+        assert_eq!(
+            GuestAccount.fix().unwrap().command_line(),
+            "sudo sysadminctl -guestAccount off"
         );
     }
 

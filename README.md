@@ -2,11 +2,13 @@
 
 A small, fast Rust CLI that audits the security settings of your Mac, scores
 them out of 100 and reports what to fix. It also finds known vulnerabilities
-in your project dependencies, macOS and common apps, scans for malicious npm
-packages, and locates API keys scattered across `.env` and config files.
+in your project dependencies, macOS, common apps and Homebrew formulae, scans
+for malicious npm packages, and locates API keys scattered across `.env` and
+config files.
 
-The audit is **read-only**. The only path that changes anything on the system
-is `--fix`, which asks for confirmation before every command.
+The tool is **read-only**: it never changes a setting on your Mac. For every
+problem it explains what to do, and where a single command does the job it
+shows that command for you to run yourself.
 
 ## Usage
 
@@ -25,12 +27,11 @@ cargo run -- --json               # JSON output (scripts / CI)
 cargo run -- --format html -o report.html
 cargo run -- --only filevault,sip # run selected checks only
 cargo run -- --min-score 80 -q    # CI: exit code 1 if the score is below 80
-cargo run -- --fix --dry-run      # preview fix commands
 cargo run -- --npm                # malicious npm package scan (global + projects)
 cargo run -- --npm --online       # also query the OSV.dev malicious package database
 cargo run -- --secrets            # find API keys in .env and config files
 cargo run -- --secrets --secrets-path ~/project   # scan a single directory / file
-cargo run -- --vulns              # inventory of lockfiles, macOS and known apps (offline)
+cargo run -- --vulns              # inventory of lockfiles, macOS, known apps and Homebrew (offline)
 cargo run -- --vulns --online     # look them up in OSV.dev, NVD, CISA KEV and EPSS
 cargo run -- --help
 ```
@@ -41,31 +42,37 @@ Tests: `cargo test`
 
 `cargo run -- --list` prints the current list with id, weight and CIS section.
 
-| Id | Check | Weight | Severity | `--fix` |
+| Id | Check | Weight | Severity | Remedy |
 | --- | --- | --- | --- | --- |
-| `filevault` | FileVault (disk encryption) | 25 | critical | manual |
-| `sip` | System Integrity Protection (SIP) | 20 | critical | manual |
-| `gatekeeper` | Gatekeeper | 15 | high | manual |
-| `auto-update` | Automatic updates | 10 | high | yes |
-| `pending-updates` | Pending updates | 10 | medium | manual |
-| `xprotect` | XProtect signatures | 5 | medium | manual |
-| `firewall` | Firewall | 20 | high | yes |
-| `stealth` | Firewall stealth mode | 5 | low | yes |
-| `ssh` | Remote Login (SSH) | 10 | medium | yes |
-| `sharing` | Sharing services | 10 | medium | manual |
-| `airdrop` | AirDrop visibility | 5 | low | manual |
-| `auto-login` | Automatic login | 10 | high | yes |
-| `guest` | Guest account | 5 | medium | yes |
-| `screen-lock` | Screen lock password | 10 | medium | manual |
-| `sudo` | Passwordless sudo | 10 | high | manual |
-| `launch-items` | Launch items | 10 | medium | manual |
-| `npm-packages` | Malicious npm packages | 15 | critical | manual |
+| `filevault` | FileVault (disk encryption) | 25 | critical | settings |
+| `sip` | System Integrity Protection (SIP) | 20 | critical | settings |
+| `gatekeeper` | Gatekeeper | 15 | high | settings |
+| `auto-update` | Automatic updates | 10 | high | settings |
+| `pending-updates` | Pending updates | 10 | medium | settings |
+| `xprotect` | XProtect signatures | 5 | medium | settings |
+| `firewall` | Firewall | 20 | high | command |
+| `stealth` | Firewall stealth mode | 5 | low | command |
+| `ssh` | Remote Login (SSH) | 10 | medium | settings |
+| `sharing` | Sharing services | 10 | medium | settings |
+| `airdrop` | AirDrop visibility | 5 | low | settings |
+| `auto-login` | Automatic login | 10 | high | settings |
+| `guest` | Guest account | 5 | medium | command |
+| `screen-lock` | Screen lock password | 10 | medium | settings |
+| `sudo` | Passwordless sudo | 10 | high | settings |
+| `launch-items` | Launch items | 10 | medium | settings |
+| `npm-packages` | Malicious npm packages | 15 | critical | settings |
+
+`command` means the report prints a command you can run yourself; `settings`
+means the advice points to the place in System Settings (or Recovery).
 
 ### Scoring
 
 - `Pass` earns full weight, `Warn` half, `Fail` none.
 - Checks whose state cannot be determined (`Unknown`) and checks with an
-  exception are left out of the denominator.
+  exception are left out of the denominator. If that leaves nothing to
+  score, the score is shown as `n/a`.
+- A check never passes on a guess: a command that fails, times out (20 s)
+  or prints something unexpected gives `Unknown` with the raw output.
 - Grades: 90+ A, 75+ B, 60+ C, 40+ D, below that F.
 
 ### Exit code
@@ -75,6 +82,12 @@ Tests: `cargo test`
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
 | 2 | Usage or configuration error |
+| 3 | `--npm` / `--vulns` with `--online`: a lookup failed, so the scan is incomplete |
+
+The scan modes use 1 for their own "found something" condition (described in
+each section) and 3 when an online lookup failed and nothing was found in the
+part that did work: a script must not read an incomplete scan as a clean one.
+The dashboard is interactive and always exits with 0.
 
 ## Secret scan (`--secrets`)
 
@@ -97,8 +110,15 @@ it never touches the network.
   (heuristic).
 - **Template files** (`.env.example` etc.): only real key patterns are
   matched; made-up passwords are not reported.
-- **Masking:** raw values are never written to any output. Copies of the same
-  key in different files are linked through `secret_id`.
+- **Masking:** raw values are never written to any output. A finding shows
+  at most the provider's public prefix (`sk-ant-`, `ghp_`, `AKIA`…) and the
+  last 2–4 characters of long keys; passwords, generic matches and anything
+  under 20 characters show only their length. Copies of the same key in
+  different files are linked through `secret_id`, a running number that says
+  nothing about the value.
+- **Skipped files:** files over 8 MB, binary files and unreadable files are
+  counted and reported, not dropped silently. PGP private key blocks are
+  reported without a claim about passphrase protection.
 - **Flags:** `TRACKED IN GIT` when the file is tracked by a git repository,
   `mode 644` when group / other users can read it.
 - **Exit code:** 1 if a secret sits in a git-tracked file, 0 otherwise.
@@ -115,7 +135,7 @@ ranks them by how likely they are to be exploited.
 | What | Source | How it is matched |
 | --- | --- | --- |
 | Project dependencies | [OSV.dev](https://osv.dev) | Exact name + version from lockfiles |
-| macOS and common apps | [NVD](https://nvd.nist.gov) | Product name + installed version; only known-exploited CVEs are reported |
+| macOS, common apps and Homebrew formulae | [NVD](https://nvd.nist.gov) | Product name + installed version; only known-exploited CVEs are reported |
 | "Is it exploited in the wild?" | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | CVE id |
 | "How likely is exploitation?" | [EPSS](https://www.first.org/epss/) | CVE id |
 
@@ -123,6 +143,11 @@ ranks them by how likely they are to be exploited.
   `pnpm-lock.yaml`, `requirements*.txt` (pinned lines), `poetry.lock`,
   `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`, `go.mod`, found
   under your home directory. Dependency and build directories are skipped.
+- **Homebrew:** installed formulae are read from the Cellar (`/opt/homebrew`,
+  `/usr/local` or `HOMEBREW_PREFIX`); `brew` itself is never run. Well-known
+  formulae (`openssl`, `curl`, `git`, `node`, `python`, `php`, …) are looked
+  up; the report says how many others were left out. Casks are covered when
+  the installed app is in the application table.
 - **Ranking:** known-exploited (KEV) and malware first, then EPSS probability,
   then severity. The text report shows the top 25; `--json` has everything.
 - **Offline by default:** without `--online` only the inventory is printed.
@@ -134,15 +159,18 @@ ranks them by how likely they are to be exploited.
   seconds, so the first run takes a few seconds per product. Set `NVD_API_KEY`
   to speed it up.
 - **Options:** `--vulns-path PATH` scans only the lockfiles under a path (and
-  skips macOS and apps); `--json`, `-o FILE` and `-q` work as usual.
+  skips macOS, apps and Homebrew); `--json`, `-o FILE` and `-q` work as usual.
 - **Exit code:** 1 if a known-exploited vulnerability or malware is found,
   0 otherwise.
 
-Limits: applications are matched through a built-in table of bundle ids, so
-apps that are not in the table are not checked; NVD matching depends on the
-vendor publishing version data and can miss or over-report; unpinned
-requirements (`flask>=2.0`) and git / path dependencies are ignored; Homebrew
-packages are not covered.
+Limits: applications and Homebrew formulae are matched through built-in
+tables (bundle ids and formula names), so anything that is not in a table is
+not checked; for these products only known-exploited CVEs are reported, not
+every CVE; NVD matching depends on the vendor publishing version data and can
+miss or over-report; unpinned requirements (`flask>=2.0`) and git / path /
+workspace dependencies are ignored and never sent anywhere, but a private
+registry that looks like a public one cannot be told apart from the lockfile,
+so its package names are looked up too.
 
 ## npm malicious package scan (`--npm`)
 
@@ -193,8 +221,9 @@ details of every check, the previous run and the checks that changed.
 
 ## History and comparison
 
-Every full audit is saved to `~/.macos-audit/history.json` (last 100 runs).
-The next run shows the score difference and the checks whose status changed.
+Every full audit, from the command line or the dashboard, is saved to
+`~/.macos-audit/history.json` (last 100 runs). The next run shows the score
+difference and the checks whose status changed.
 
 - `--history` : list past audits
 - `--no-history` : do not save or compare
@@ -222,17 +251,14 @@ A check with an exception still runs and shows up in the report as
 `EXCEPTION`, but it does not affect the score or the exit code. Unknown ids and
 fields are errors.
 
-## Fix mode (`--fix`)
+## Recommendations
 
-For every problem that has an automatic fix, shows the command that would run
-and asks for confirmation one by one (`y`/`yes`). The check is re-run after
-the command, and you are told if the problem persists.
-
-- `--fix --dry-run` : only show the commands, run nothing
-- `--fix --yes` : apply without asking
-- Most commands need `sudo`; the password is prompted by `sudo` itself.
-- Settings such as FileVault, SIP and Gatekeeper can only be changed by hand;
-  for those a recommendation is shown.
+The tool never applies a fix. Every failed or warned check comes with advice,
+and where one command is a correct and complete remedy the report prints it
+under `Run:` (the dashboard shows it as "Command to run yourself"). Settings
+such as FileVault, SIP and Gatekeeper can only be changed in System Settings
+or Recovery; for those the advice names the place. Run the audit again
+afterwards to confirm.
 
 ## Dashboard
 
@@ -245,7 +271,9 @@ is printed instead, so existing scripts keep working.
   Online lookups are off until you press `o`.
 - **Running:** the current phase, a progress bar with a percentage when the
   total is known (a moving bar when it is not), the step counter, elapsed
-  time and the most recent items being processed. `Esc` cancels.
+  time and the most recent items being processed. `Esc` goes back and stops
+  the scan: no further network request is started (a request already in
+  flight finishes, and what was downloaded stays cached).
 - **Results:** findings on the left, the selected finding's details on the
   right, most urgent first.
 
@@ -256,7 +284,7 @@ is printed instead, so existing scripts keep working.
 | `Enter`, `1`–`4` | Run the selected module / run a module directly |
 | `o` | Turn online lookups on or off (home screen) |
 | `r` | Re-run the current module |
-| `Esc` | Back to the home screen (cancels a running scan) |
+| `Esc` | Back to the home screen (stops a running scan) |
 | `q` | Quit |
 
 On the command line, `--vulns --online` prints the same phases to stderr.
@@ -268,7 +296,9 @@ On the command line, `--vulns --online` prints the same phases to stderr.
 | `src/main.rs` | Command line (`clap`) and control flow |
 | `src/checks/mod.rs` | The `Check` trait, the registry, parallel execution |
 | `src/checks/{system,network,accounts,persistence,supply_chain}.rs` | The checks |
-| `src/npm.rs` | npm package scan, incident list, OSV lookup |
+| `src/npm.rs` | npm package scan, incident list |
+| `src/osv.rs` | OSV.dev batch queries (with paging), shared by both scans |
+| `src/net.rs` | HTTP through the system `curl` |
 | `src/vulns.rs` | Vulnerability scan: OSV / NVD / KEV / EPSS lookups, ranking, report |
 | `src/lockfiles.rs` | Lockfile discovery and parsers |
 | `src/secrets.rs` | Secret scan: rules, file discovery, masking |
@@ -277,7 +307,6 @@ On the command line, `--vulns --online` prints the same phases to stderr.
 | `src/score.rs` | Score, grade, summary |
 | `src/history.rs` | History records and diffing |
 | `src/report.rs` | Text / JSON / Markdown / HTML |
-| `src/fix.rs` | Fix mode |
 | `src/tui.rs` | `ratatui` dashboard: home, progress and result screens |
 | `src/progress.rs` | Progress events shared by the dashboard and the command line |
 
@@ -294,3 +323,12 @@ be tested against canned output with `MockRunner`.
   hidden directories, download-and-execute, etc.); a warning is not a verdict.
 - This tool covers baseline configuration checks. It is not a replacement for
   a full security assessment.
+
+## License
+
+Copyright © 2026 Seyfullah KILIÇ.
+
+Source-available under the [PolyForm Strict License 1.0.0](LICENSE.md): you
+may read the code and run the tool for noncommercial purposes. Commercial use,
+redistribution and modified versions are not permitted. This is not an open
+source license. For anything else, ask the author.

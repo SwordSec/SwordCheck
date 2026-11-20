@@ -3,6 +3,9 @@ name = "macos-audit"
 version = "0.1.0"
 edition = "2024"
 description = "A small CLI tool that audits local macOS security settings"
+license-file = "LICENSE.md"
+# Source-available, not open source: keep it off crates.io.
+publish = false
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

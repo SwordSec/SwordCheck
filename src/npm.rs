@@ -17,6 +17,7 @@
 //! The scan is read-only: only `package.json` files are read, and no package
 //! code is ever executed.
 
+use crate::osv;
 use crate::progress::Progress;
 use crate::runner::CommandRunner;
 use colored::Colorize;
@@ -24,9 +25,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// A package that had a malicious version published. If `versions` is empty
 /// the whole package is malicious (e.g. typosquat packages created solely
@@ -285,8 +284,8 @@ impl Scanner {
     /// Walks the packages in a `node_modules` directory.
     fn node_modules(&mut self, dir: &Path, depth: usize) {
         for (name, path) in subdirs(dir) {
-            if name == ".pnpm" {
-                // pnpm store: `.pnpm/<name>@<version>/node_modules/<package>`
+            if name == ".pnpm" || name == ".bun" {
+                // pnpm and Bun stores: `.pnpm/<name>@<version>/node_modules/<package>`
                 for (_, store_entry) in subdirs(&path) {
                     self.node_modules(&store_entry.join("node_modules"), depth);
                 }
@@ -563,10 +562,6 @@ fn unique_dirs(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
 
 // ---- OSV.dev query (--online) ----
 
-const OSV_URL: &str = "https://api.osv.dev/v1/querybatch";
-/// OSV accepts at most 1000 queries per request.
-const OSV_BATCH: usize = 1000;
-
 /// An installed version that has a malicious package record in OSV.
 #[derive(Debug, PartialEq, Eq)]
 pub struct OsvHit {
@@ -590,108 +585,25 @@ pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> Result<Vec
         .collect();
 
     progress.stage(format!("Asking OSV.dev about {} package versions", packages.len()));
-    let batches = packages.len().div_ceil(OSV_BATCH);
-    let mut hits = Vec::new();
-    for (index, chunk) in packages.chunks(OSV_BATCH).enumerate() {
-        let response = post_json(OSV_URL, &osv_request(chunk))?;
-        hits.extend(parse_osv(&response, chunk)?);
-        progress.step(index + 1, batches);
-        progress.note(format!("{} malicious package records so far", hits.len()));
-    }
-    Ok(hits)
-}
-
-fn osv_request(packages: &[&(String, String)]) -> String {
-    let queries: Vec<Value> = packages
+    let queries: Vec<osv::Query> = packages
         .iter()
-        .map(|(name, version)| {
-            serde_json::json!({
-                "package": { "ecosystem": "npm", "name": name },
-                "version": version,
-            })
-        })
+        .map(|(name, version)| osv::Query { ecosystem: "npm", name, version })
         .collect();
-    serde_json::json!({ "queries": queries }).to_string()
+    let results = osv::query(&queries, |done, total| progress.step(done, total))?;
+    Ok(malware_hits(&packages, results))
 }
 
-/// The `results` array in the response is in the same order as the queries.
-/// Vulnerability (GHSA/CVE) records are out of scope; only `MAL-` records
-/// are kept.
-fn parse_osv(response: &str, packages: &[&(String, String)]) -> Result<Vec<OsvHit>, String> {
-    let parsed: Value =
-        serde_json::from_str(response).map_err(|err| format!("could not parse OSV response: {err}"))?;
-    let results = parsed
-        .get("results")
-        .and_then(Value::as_array)
-        .ok_or("OSV response has no `results` field")?;
-    if results.len() != packages.len() {
-        return Err(format!(
-            "OSV returned {1} results for {0} queries",
-            packages.len(),
-            results.len()
-        ));
-    }
-
-    let mut hits = Vec::new();
-    for (result, (name, version)) in results.iter().zip(packages) {
-        let ids: Vec<String> = result
-            .get("vulns")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|vuln| vuln.get("id").and_then(Value::as_str))
-            .filter(|id| id.starts_with("MAL-"))
-            .map(str::to_string)
-            .collect();
-        if !ids.is_empty() {
-            hits.push(OsvHit {
-                package: name.clone(),
-                version: version.clone(),
-                ids,
-            });
-        }
-    }
-    Ok(hits)
-}
-
-/// Sends JSON with `curl`. The body is passed via stdin rather than as an
-/// argument: a request covering thousands of packages could exceed the
-/// command line length limit.
-pub(crate) fn post_json(url: &str, body: &str) -> Result<String, String> {
-    let mut child = Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--max-time",
-            "60",
-            "--header",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-            url,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("could not run `curl`: {err}"))?;
-
-    // We write stdin and close it (`take` + end of scope) so that curl
-    // knows the input has ended.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(body.as_bytes())
-            .map_err(|err| format!("could not send request: {err}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("could not wait for `curl`: {err}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+/// Vulnerability (GHSA/CVE) records are out of scope here; only `MAL-`
+/// records are kept.
+fn malware_hits(packages: &[&(String, String)], results: Vec<Vec<osv::Vuln>>) -> Vec<OsvHit> {
+    packages
+        .iter()
+        .zip(results)
+        .filter_map(|((name, version), vulns)| {
+            let ids: Vec<String> = vulns.into_iter().map(|vuln| vuln.id).filter(|id| id.starts_with("MAL-")).collect();
+            (!ids.is_empty()).then(|| OsvHit { package: name.clone(), version: version.clone(), ids })
+        })
+        .collect()
 }
 
 // ---- Report (--npm) ----
@@ -987,28 +899,16 @@ mod tests {
         let c = ("vulnerable".to_string(), "3.0.0".to_string());
         let packages = [&a, &b, &c];
 
-        let request: Value = serde_json::from_str(&osv_request(&packages)).unwrap();
-        assert_eq!(request["queries"][1]["package"]["ecosystem"], "npm");
-        assert_eq!(request["queries"][1]["package"]["name"], "malicious");
-        assert_eq!(request["queries"][1]["version"], "2.0.0");
-
-        let response = r#"{"results":[
-            {},
-            {"vulns":[{"id":"GHSA-xxxx","modified":"x"},{"id":"MAL-2025-1","modified":"x"}]},
-            {"vulns":[{"id":"GHSA-yyyy","modified":"x"}]}
-        ]}"#;
-        let hits = parse_osv(response, &packages).unwrap();
+        let vuln = |id: &str| osv::Vuln { id: id.to_string(), modified: "x".to_string() };
+        let results = vec![vec![], vec![vuln("GHSA-xxxx"), vuln("MAL-2025-1")], vec![vuln("GHSA-yyyy")]];
         assert_eq!(
-            hits,
+            malware_hits(&packages, results),
             [OsvHit {
                 package: "malicious".into(),
                 version: "2.0.0".into(),
                 ids: vec!["MAL-2025-1".into()],
             }]
         );
-
-        assert!(parse_osv(r#"{"results":[{}]}"#, &packages).is_err());
-        assert!(parse_osv("<html>", &packages).is_err());
     }
 
     #[test]

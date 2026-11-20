@@ -15,15 +15,17 @@
 //! - `vulns`   : vulnerability scan of dependencies, macOS and apps (`--vulns`)
 //! - `lockfiles`: lockfile parsers used by the vulnerability scan
 //! - `secrets` : API key / secret scan (`--secrets`)
-//! - `fix`     : fix mode with confirmation
+//! - `osv`     : OSV.dev batch queries shared by `npm` and `vulns`
+//! - `net`     : HTTP through the system `curl`
 //! - `tui`     : interactive dashboard
 
 mod checks;
 mod config;
-mod fix;
 mod history;
 mod lockfiles;
+mod net;
 mod npm;
+mod osv;
 mod progress;
 mod report;
 mod runner;
@@ -53,7 +55,7 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "macos-audit [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n\nConfiguration: ./audit.toml or ~/.config/macos-audit/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/macos-audit/audit.toml"
 )]
 struct Cli {
     /// Output format
@@ -104,24 +106,12 @@ struct Cli {
     #[arg(long)]
     no_history: bool,
 
-    /// Show the command for fixable issues and apply it after confirmation
-    #[arg(long, conflicts_with_all = ["json", "output", "tui", "quiet"])]
-    fix: bool,
-
-    /// With --fix: only show the commands, do not run them
-    #[arg(long, requires = "fix")]
-    dry_run: bool,
-
-    /// With --fix: apply without asking for confirmation
-    #[arg(short = 'y', long, requires = "fix")]
-    yes: bool,
-
     /// Open the interactive dashboard
-    #[arg(long, conflicts_with_all = ["json", "output", "quiet"])]
+    #[arg(long, conflicts_with_all = ["json", "output", "quiet", "min_score"])]
     tui: bool,
 
     /// Scan all npm packages (global + projects) for malware
-    #[arg(long, group = "network_mode", conflicts_with_all = ["fix", "tui", "list", "history"])]
+    #[arg(long, group = "network_mode", conflicts_with_all = ["tui", "list", "history", "only", "skip", "min_score", "no_history", "config"])]
     npm: bool,
 
     /// With --npm: scan only this directory (repeatable)
@@ -132,16 +122,16 @@ struct Cli {
     #[arg(long, requires = "network_mode")]
     online: bool,
 
-    /// List known vulnerabilities in project dependencies, macOS and common apps
-    #[arg(long, group = "network_mode", conflicts_with_all = ["fix", "tui", "list", "history", "secrets"])]
+    /// List known vulnerabilities in project dependencies, macOS, common apps and Homebrew formulae
+    #[arg(long, group = "network_mode", conflicts_with_all = ["tui", "list", "history", "secrets", "only", "skip", "min_score", "no_history", "config"])]
     vulns: bool,
 
-    /// With --vulns: scan only the lockfiles under this path (repeatable; skips macOS and apps)
+    /// With --vulns: scan only the lockfiles under this path (repeatable; skips macOS, apps and Homebrew)
     #[arg(long, value_name = "PATH", requires = "vulns")]
     vulns_path: Vec<PathBuf>,
 
     /// Search .env and configuration files for API keys / secrets
-    #[arg(long, conflicts_with_all = ["fix", "tui", "list", "history", "npm"])]
+    #[arg(long, conflicts_with_all = ["tui", "list", "history", "npm", "only", "skip", "min_score", "no_history", "config"])]
     secrets: bool,
 
     /// With --secrets: scan only this directory or file (repeatable)
@@ -182,6 +172,22 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         return Err("This tool only runs on macOS.".to_string());
     }
 
+    // The scan modes do not use the audit configuration or the check list.
+    if cli.npm {
+        return run_npm(&cli);
+    }
+    if cli.secrets {
+        return run_secrets(&cli);
+    }
+    if cli.vulns {
+        return run_vulns(&cli);
+    }
+
+    // A configuration picked up from the current directory can skip or
+    // exempt checks, so say that it is in effect.
+    if cli.config.is_none() && !cli.quiet && std::path::Path::new("audit.toml").is_file() {
+        eprintln!("{} using ./audit.toml from the current directory.", "Note:".dimmed());
+    }
     let config = Config::load(cli.config.as_deref())?;
     let mut checks = checks::registry();
     validate_ids(&cli, &config, &checks)?;
@@ -209,16 +215,6 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         return Err("No checks left to run (review your --only / --skip selections).".to_string());
     }
 
-    if cli.npm {
-        return run_npm(&cli);
-    }
-    if cli.secrets {
-        return run_secrets(&cli);
-    }
-    if cli.vulns {
-        return run_vulns(&cli);
-    }
-
     let runner = SystemRunner::new();
     let os_version = checks::os_version(&runner);
 
@@ -230,6 +226,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             return Err("--tui requires an interactive terminal.".to_string());
         }
         let setup = tui::Setup {
+            // Partial runs cannot be compared with a full audit.
+            save_history: !cli.no_history && cli.only.is_empty() && cli.skip.is_empty(),
             check_ids: checks.iter().map(|check| check.id().to_string()).collect(),
             config,
             os_version,
@@ -258,37 +256,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
     let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let format = if cli.json { Format::Json } else { cli.format };
-    let mut report = Report::new(timestamp.clone(), os_version.clone(), results, records.last());
+    let report = Report::new(timestamp.clone(), os_version.clone(), results, records.last());
+    emit(&cli, &report.render(format, cli.quiet))?;
 
-    let rendered = report.render(format, cli.quiet);
-    match &cli.output {
-        Some(path) => {
-            std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
-            if !cli.quiet {
-                eprintln!("Report written: {}", path.display());
-            }
-        }
-        None => println!("{rendered}"),
-    }
-
-    if cli.fix {
-        let options = fix::FixOptions {
-            dry_run: cli.dry_run,
-            yes: cli.yes,
-        };
-        let summary = fix::run_fixes(&report.checks, &checks, &config, &options);
-
-        // If anything changed, re-run the whole audit and show the new score.
-        if summary.applied > 0 {
-            let before = report.score;
-            let results = checks::run_checks(&checks, &SystemRunner::new(), &config);
-            report = Report::new(timestamp.clone(), os_version.clone(), results, records.last());
-            println!("Score: {before} → {}", report.score.to_string().bold());
-        }
-    }
-
-    if let Some(path) = history_file {
+    // A run in which nothing could be evaluated has no score worth comparing.
+    if let Some(path) = history_file.filter(|_| report.scorable) {
         let record = history::RunRecord::new(timestamp, os_version, report.score, &report.checks);
         if let Err(err) = history::append(&path, records, record) {
             eprintln!("{} could not save history: {err}", "Warning:".yellow());
@@ -300,12 +272,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
 /// `--npm`: scans installed npm packages in detail. The exit code is 1 if a
 /// confirmed malicious package was found; heuristic script warnings do not
-/// affect the code.
+/// affect the code. A failed `--online` lookup gives `EXIT_INCOMPLETE`.
 fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
-    let format = if cli.json { Format::Json } else { cli.format };
-    if !matches!(format, Format::Text | Format::Json) {
-        return Err("--npm only supports the text and json formats.".to_string());
-    }
+    let format = text_or_json(cli, "--npm")?;
 
     let roots = if cli.npm_path.is_empty() {
         npm::all_roots(&SystemRunner::new())
@@ -324,13 +293,17 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
 
     // If OSV cannot be reached, the local results are still shown.
     let mut online = false;
+    let mut incomplete = false;
     if cli.online {
         match npm::osv_lookup(&scan.installed) {
             Ok(hits) => {
                 scan.add_osv(hits);
                 online = true;
             }
-            Err(err) => eprintln!("{} OSV query failed: {err}", "Warning:".yellow()),
+            Err(err) => {
+                incomplete = true;
+                eprintln!("{} OSV query failed: {err}. Only the built-in list was checked.", "Warning:".yellow());
+            }
         }
     }
 
@@ -347,28 +320,20 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
         ),
         _ => report.to_text(),
     };
-    match &cli.output {
-        Some(path) => {
-            std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
-            if !cli.quiet {
-                eprintln!("Report written: {}", path.display());
-            }
-        }
-        None => println!("{rendered}"),
-    }
+    emit(cli, &rendered)?;
 
-    Ok(if found_malware { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(match (found_malware, incomplete) {
+        (true, _) => ExitCode::FAILURE,
+        (false, true) => ExitCode::from(EXIT_INCOMPLETE),
+        (false, false) => ExitCode::SUCCESS,
+    })
 }
 
 /// `--secrets`: scans files that may hold secrets. The exit code is 1 if a
 /// secret was found in a file tracked in git; ordinary secrets inside `.env`
 /// do not affect the code.
 fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
-    let format = if cli.json { Format::Json } else { cli.format };
-    if !matches!(format, Format::Text | Format::Json) {
-        return Err("--secrets only supports the text and json formats.".to_string());
-    }
+    let format = text_or_json(cli, "--secrets")?;
 
     let files = if cli.secrets_path.is_empty() {
         secrets::default_files()
@@ -397,16 +362,7 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
         ),
         _ => report.to_text(),
     };
-    match &cli.output {
-        Some(path) => {
-            std::fs::write(path, format!("{rendered}\n"))
-                .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
-            if !cli.quiet {
-                eprintln!("Report written: {}", path.display());
-            }
-        }
-        None => println!("{rendered}"),
-    }
+    emit(cli, &rendered)?;
 
     Ok(if exposed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
@@ -414,11 +370,9 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
 /// `--vulns`: lists known vulnerabilities in project dependencies, macOS and
 /// common applications. The exit code is 1 when a known-exploited
 /// vulnerability (or malware) is found; other findings do not affect it.
+/// A failed `--online` lookup gives `EXIT_INCOMPLETE`.
 fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
-    let format = if cli.json { Format::Json } else { cli.format };
-    if !matches!(format, Format::Text | Format::Json) {
-        return Err("--vulns only supports the text and json formats.".to_string());
-    }
+    let format = text_or_json(cli, "--vulns")?;
 
     // An explicit path narrows the scan to those projects.
     let (paths, system) = if cli.vulns_path.is_empty() {
@@ -429,9 +383,13 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
             if !path.exists() {
                 return Err(format!("{} not found.", path.display()));
             }
+            let named_like_one = path.file_name().is_some_and(|name| lockfiles::is_lockfile(&name.to_string_lossy()));
+            if path.is_file() && !named_like_one {
+                return Err(format!("{} is not a lockfile this tool can read.", path.display()));
+            }
             paths.extend(lockfiles::files_under(path));
         }
-        (paths, Vec::new())
+        (paths, vulns::System::default())
     };
     // Progress goes to stderr so that it never mixes with the report.
     let progress = if !cli.quiet && std::io::stderr().is_terminal() {
@@ -464,6 +422,30 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
         ),
         _ => report.to_text(),
     };
+    emit(cli, &rendered)?;
+
+    // A failed lookup may hide an exploited vulnerability: never report success.
+    Ok(match (exploited > 0, report.scan.warnings.is_empty()) {
+        (true, _) => ExitCode::FAILURE,
+        (false, false) => ExitCode::from(EXIT_INCOMPLETE),
+        (false, true) => ExitCode::SUCCESS,
+    })
+}
+
+/// Exit code for a scan whose online lookup failed: the result is incomplete,
+/// so a script must not read it as "nothing found".
+const EXIT_INCOMPLETE: u8 = 3;
+
+/// The scan modes only have a text and a JSON report.
+fn text_or_json(cli: &Cli, mode: &str) -> Result<Format, String> {
+    match if cli.json { Format::Json } else { cli.format } {
+        format @ (Format::Text | Format::Json) => Ok(format),
+        _ => Err(format!("{mode} only supports the text and json formats.")),
+    }
+}
+
+/// Prints the report, or writes it to the `--output` file.
+fn emit(cli: &Cli, rendered: &str) -> Result<(), String> {
     match &cli.output {
         Some(path) => {
             std::fs::write(path, format!("{rendered}\n"))
@@ -474,8 +456,7 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
         }
         None => println!("{rendered}"),
     }
-
-    Ok(if exploited > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(())
 }
 
 /// Determines the exit code, for use in scripts and CI.
@@ -528,7 +509,7 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
         "{}",
         format!(
             "{:<16} {:>7}  {:<8} {:<8} {:<9} {}",
-            "ID", "WEIGHT", "SEVERITY", "CIS", "FIX", "NAME"
+            "ID", "WEIGHT", "SEVERITY", "CIS", "REMEDY", "NAME"
         )
         .bold()
     );
@@ -550,7 +531,7 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
             weight,
             check.severity().label(),
             check.cis().unwrap_or("–"),
-            if check.fix().is_some() { "yes" } else { "manual" },
+            if check.fix().is_some() { "command" } else { "settings" },
             name
         );
     }
@@ -604,17 +585,17 @@ mod tests {
 
     #[test]
     fn invalid_combinations_are_rejected() {
-        assert!(parse(&["--dry-run"]).is_err(), "--dry-run is not allowed on its own");
-        assert!(parse(&["--fix", "--json"]).is_err());
+        assert!(parse(&["--fix"]).is_err(), "the tool is read-only: there is no fix mode");
         assert!(parse(&["--min-score", "101"]).is_err());
         assert!(parse(&["--unknown"]).is_err());
-        assert!(parse(&["--fix", "--dry-run"]).is_ok());
         assert!(parse(&["--online"]).is_err(), "--online only with --npm or --vulns");
         assert!(parse(&["--vulns", "--online", "--vulns-path", "a"]).is_ok());
         assert!(parse(&["--vulns", "--npm"]).is_err());
         assert!(parse(&["--vulns-path", "."]).is_err(), "--vulns-path only with --vulns");
         assert!(parse(&["--npm-path", "."]).is_err());
-        assert!(parse(&["--npm", "--fix"]).is_err());
+        assert!(parse(&["--npm", "--only", "sip"]).is_err(), "audit options do not apply to the scan modes");
+        assert!(parse(&["--vulns", "--min-score", "80"]).is_err());
+        assert!(parse(&["--secrets", "--no-history"]).is_err());
         assert!(parse(&["--npm", "--online", "--npm-path", "a", "--npm-path", "b"]).is_ok());
         assert!(parse(&["--secrets-path", "."]).is_err(), "--secrets-path only with --secrets");
         assert!(parse(&["--secrets", "--npm"]).is_err());

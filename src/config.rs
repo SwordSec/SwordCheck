@@ -17,6 +17,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// The largest weight a check may be given. A cap keeps typos out and the
+/// score arithmetic far away from overflow.
+pub const MAX_WEIGHT: u32 = 1000;
+
 /// The configuration. All fields are optional (`#[serde(default)]`);
 /// `deny_unknown_fields` reports typos instead of silently swallowing them.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -26,7 +30,7 @@ pub struct Config {
     pub min_score: Option<u32>,
     /// Ids of checks that are never run.
     pub skip: Vec<String>,
-    /// Check id → weight in the score.
+    /// Check id → weight in the score (at most `MAX_WEIGHT`).
     pub weights: HashMap<String, u32>,
     /// Check id → exception reason. An exempted check still runs and is
     /// shown, but does not affect the score or the exit code.
@@ -60,6 +64,18 @@ impl Config {
         let config: Config = toml::from_str(text).map_err(|err| err.to_string())?;
         if config.min_score.is_some_and(|score| score > 100) {
             return Err("min_score must be between 0 and 100".to_string());
+        }
+        // Sorted so the error is the same on every run.
+        let mut too_heavy: Vec<(&String, &u32)> = config
+            .weights
+            .iter()
+            .filter(|(_, weight)| **weight > MAX_WEIGHT)
+            .collect();
+        too_heavy.sort();
+        if let Some((id, weight)) = too_heavy.first() {
+            return Err(format!(
+                "weight for `{id}` is {weight}; it must be between 0 and {MAX_WEIGHT}"
+            ));
         }
         Ok(config)
     }
@@ -123,5 +139,20 @@ mod tests {
     fn unknown_field_and_invalid_score_are_rejected() {
         assert!(Config::parse("minscore = 80").is_err());
         assert!(Config::parse("min_score = 150").is_err());
+    }
+
+    #[test]
+    fn weights_are_capped() {
+        let at_cap = Config::parse("[weights]\nfilevault = 1000").unwrap();
+        assert_eq!(at_cap.weights["filevault"], MAX_WEIGHT);
+        assert!(Config::parse("[weights]\nfilevault = 0").is_ok());
+
+        let err = Config::parse("[weights]\nssh = 5\nfilevault = 1001").unwrap_err();
+        assert!(err.contains("filevault") && err.contains("1000"), "{err}");
+
+        // The value that used to overflow `weight * 2`.
+        assert!(Config::parse("[weights]\nfilevault = 2147483648").is_err());
+        assert!(Config::parse("[weights]\nfilevault = 4294967295").is_err());
+        assert!(Config::parse("[weights]\nfilevault = -1").is_err());
     }
 }
