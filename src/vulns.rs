@@ -4,8 +4,9 @@
 //! Two inventories are checked:
 //! 1. **Project dependencies** from lockfiles (see `lockfiles`), looked up in
 //!    OSV.dev.
-//! 2. **macOS and well-known applications**, looked up in the NVD by product
-//!    name and version. Only applications in `APPS` are covered.
+//! 2. **macOS, well-known applications and Homebrew formulae**, looked up in
+//!    the NVD by product name and version. Only the applications in `APPS`
+//!    and the formulae in `FORMULAE` are covered.
 //!
 //! Finding a vulnerability is the easy part; a typical machine has hundreds.
 //! The scan therefore ranks them with two signals:
@@ -22,22 +23,18 @@ use crate::progress::Progress;
 use crate::runner::CommandRunner;
 use colored::Colorize;
 use serde::Serialize;
-use serde_json::{Value, json};
+use crate::net::{self, run_curl};
+use crate::osv;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-const OSV_BATCH_URL: &str = "https://api.osv.dev/v1/querybatch";
-const OSV_VULN_URL: &str = "https://api.osv.dev/v1/vulns";
 const KEV_URL: &str = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const EPSS_URL: &str = "https://api.first.org/data/v1/epss";
 const NVD_URL: &str = "https://services.nvd.nist.gov/rest/json/cves/2.0";
 
-/// OSV accepts at most 1000 queries per request.
-const OSV_BATCH: usize = 1000;
 /// EPSS accepts a comma-separated list; keep URLs comfortably short.
 const EPSS_BATCH: usize = 100;
 /// KEV and NVD answers are reused for a day.
@@ -61,7 +58,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Severity::Critical => "CRITICAL",
             Severity::High => "HIGH",
@@ -125,9 +122,22 @@ pub struct SystemVuln {
     pub date_added: String,
 }
 
-/// macOS itself or an installed application.
-#[derive(Debug, Clone, Serialize)]
+/// Where an installed product was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// macOS itself.
+    Os,
+    /// An application bundle in an `Applications` directory.
+    App,
+    /// A formula in the Homebrew Cellar.
+    Homebrew,
+}
+
+/// macOS itself, an installed application or a Homebrew formula.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SystemItem {
+    pub source: Source,
     pub name: String,
     pub version: String,
     /// The NVD product identifier that was queried.
@@ -137,6 +147,24 @@ pub struct SystemItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub exploited: Vec<SystemVuln>,
+}
+
+impl SystemItem {
+    /// Name and version as shown in reports.
+    pub fn title(&self) -> String {
+        match self.source {
+            Source::Homebrew => format!("{} {} (Homebrew)", self.name, self.version),
+            _ => format!("{} {}", self.name, self.version),
+        }
+    }
+}
+
+/// The installed products that can be looked up.
+#[derive(Debug, Default)]
+pub struct System {
+    pub items: Vec<SystemItem>,
+    /// Homebrew formulae that are installed but not in `FORMULAE`.
+    pub unmatched_formulae: usize,
 }
 
 /// Vulnerability counts for one lockfile.
@@ -167,6 +195,8 @@ pub struct Scan {
     pub packages: usize,
     pub by_ecosystem: BTreeMap<&'static str, usize>,
     pub system: Vec<SystemItem>,
+    /// Installed Homebrew formulae that could not be looked up.
+    pub unmatched_formulae: usize,
     pub findings: Vec<Finding>,
     pub projects: Vec<ProjectSummary>,
     /// Lookups that failed; the rest of the scan is still reported.
@@ -176,8 +206,17 @@ pub struct Scan {
 impl Scan {
     /// Findings that are known to be exploited, in dependencies or the system.
     pub fn exploited(&self) -> usize {
+        self.exploited_dependencies() + self.system.iter().map(|item| item.exploited.len()).sum::<usize>()
+    }
+
+    fn exploited_dependencies(&self) -> usize {
         self.findings.iter().filter(|f| f.kev.is_some() || f.malware).count()
-            + self.system.iter().map(|item| item.exploited.len()).sum::<usize>()
+    }
+
+    /// Says how many Homebrew formulae were left out, if any.
+    pub fn unmatched_note(&self) -> Option<String> {
+        (self.unmatched_formulae > 0)
+            .then(|| format!("{} other Homebrew formulae are not in the lookup table and were not checked", self.unmatched_formulae))
     }
 
     fn count(&self, severity: Severity) -> usize {
@@ -252,15 +291,115 @@ const APPS: &[(&str, &str)] = &[
     ("org.m0k.transmission", "transmissionbt:transmission"),
 ];
 
-/// Builds the list of products to look up: macOS plus recognized apps.
-pub fn system_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
+/// A Homebrew formula we know how to look up: formula → NVD
+/// `vendor:product`. Versioned formulae (`openssl@3`) use the entry of the
+/// unversioned name. Every entry was checked against the NVD.
+const FORMULAE: &[(&str, &str)] = &[
+    ("activemq", "apache:activemq"),
+    ("apache-spark", "apache:spark"),
+    ("bash", "gnu:bash"),
+    ("bind", "isc:bind"),
+    ("consul", "hashicorp:consul"),
+    ("couchdb", "apache:couchdb"),
+    ("curl", "haxx:curl"),
+    ("deno", "deno:deno"),
+    ("dnsmasq", "thekelleys:dnsmasq"),
+    ("dovecot", "dovecot:dovecot"),
+    ("exiftool", "exiftool_project:exiftool"),
+    ("exim", "exim:exim"),
+    ("expat", "libexpat_project:libexpat"),
+    ("ffmpeg", "ffmpeg:ffmpeg"),
+    ("freetype", "freetype:freetype"),
+    ("ghostscript", "artifex:ghostscript"),
+    ("git", "git-scm:git"),
+    ("gitea", "gitea:gitea"),
+    ("gnupg", "gnupg:gnupg"),
+    ("gnutls", "gnu:gnutls"),
+    ("go", "golang:go"),
+    ("grafana", "grafana:grafana"),
+    ("haproxy", "haproxy:haproxy"),
+    ("helm", "helm:helm"),
+    ("httpd", "apache:http_server"),
+    ("imagemagick", "imagemagick:imagemagick"),
+    ("jenkins", "jenkins:jenkins"),
+    ("jenkins-lts", "jenkins:jenkins"),
+    ("kafka", "apache:kafka"),
+    ("krb5", "mit:kerberos_5"),
+    ("libarchive", "libarchive:libarchive"),
+    ("libpng", "libpng:libpng"),
+    ("libpq", "postgresql:postgresql"),
+    ("libssh", "libssh:libssh"),
+    ("libssh2", "libssh2:libssh2"),
+    ("libtiff", "libtiff:libtiff"),
+    ("libvpx", "webmproject:libvpx"),
+    ("libxml2", "xmlsoft:libxml2"),
+    ("lua", "lua:lua"),
+    ("mariadb", "mariadb:mariadb"),
+    ("memcached", "memcached:memcached"),
+    ("minio", "minio:minio"),
+    ("mysql", "oracle:mysql"),
+    ("mysql-client", "oracle:mysql"),
+    ("neovim", "neovim:neovim"),
+    ("net-snmp", "net-snmp:net-snmp"),
+    ("nginx", "f5:nginx"),
+    ("node", "nodejs:node.js"),
+    ("nuclei", "projectdiscovery:nuclei"),
+    ("openjdk", "oracle:openjdk"),
+    ("openldap", "openldap:openldap"),
+    ("openssl", "openssl:openssl"),
+    ("openvpn", "openvpn:openvpn"),
+    ("pcre2", "pcre:pcre2"),
+    ("perl", "perl:perl"),
+    ("php", "php:php"),
+    ("pnpm", "pnpm:pnpm"),
+    ("postgresql", "postgresql:postgresql"),
+    ("proftpd", "proftpd:proftpd"),
+    ("python", "python:python"),
+    ("qemu", "qemu:qemu"),
+    ("redis", "redis:redis"),
+    ("rsync", "samba:rsync"),
+    ("ruby", "ruby-lang:ruby"),
+    ("rust", "rust-lang:rust"),
+    ("salt", "saltstack:salt"),
+    ("samba", "samba:samba"),
+    ("sevenzip", "7-zip:7-zip"),
+    ("solr", "apache:solr"),
+    ("sqlite", "sqlite:sqlite"),
+    ("squid", "squid-cache:squid"),
+    ("subversion", "apache:subversion"),
+    ("tomcat", "apache:tomcat"),
+    ("tor", "torproject:tor"),
+    ("vault", "hashicorp:vault"),
+    ("vim", "vim:vim"),
+    ("webp", "webmproject:libwebp"),
+    ("wget", "gnu:wget"),
+    ("wireshark", "wireshark:wireshark"),
+    ("xz", "tukaani:xz"),
+    ("zlib", "zlib:zlib"),
+    ("zsh", "zsh:zsh"),
+];
+
+/// Builds the list of products to look up: macOS, recognized apps and
+/// recognized Homebrew formulae.
+pub fn system_items(runner: &dyn CommandRunner) -> System {
+    let mut system = System { items: app_items(runner), unmatched_formulae: 0 };
+    for cellar in homebrew_cellars() {
+        let (items, unmatched) = homebrew_items(&cellar);
+        system.items.extend(items);
+        system.unmatched_formulae += unmatched;
+    }
+    system
+}
+
+/// macOS plus the applications in `APPS`.
+fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
     let mut items = Vec::new();
     let read = |program: &str, args: &[&str]| {
         runner.run(program, args).ok().filter(|out| out.success).map(|out| out.stdout.trim().to_string())
     };
 
     if let Some(version) = read("sw_vers", &["-productVersion"]).as_deref().and_then(clean_version) {
-        items.push(system_item("macOS", &version, format!("cpe:2.3:o:apple:macos:{version}:*:*:*:*:*:*:*")));
+        items.push(system_item(Source::Os, "macOS", &version, format!("cpe:2.3:o:apple:macos:{version}:*:*:*:*:*:*:*")));
     }
 
     let mut dirs = vec![PathBuf::from("/Applications")];
@@ -292,14 +431,72 @@ pub fn system_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
                 continue;
             };
             let name = app.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            items.push(system_item(&name, &version, format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*")));
+            items.push(system_item(Source::App, &name, &version, format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*")));
         }
     }
     items
 }
 
-fn system_item(name: &str, version: &str, cpe: String) -> SystemItem {
+/// The Cellar of every Homebrew installation: a custom prefix, Apple
+/// silicon and Intel.
+fn homebrew_cellars() -> Vec<PathBuf> {
+    let mut prefixes: Vec<PathBuf> = std::env::var_os("HOMEBREW_PREFIX").map(PathBuf::from).into_iter().collect();
+    for default in ["/opt/homebrew", "/usr/local"] {
+        if !prefixes.iter().any(|prefix| prefix == Path::new(default)) {
+            prefixes.push(PathBuf::from(default));
+        }
+    }
+    prefixes.into_iter().map(|prefix| prefix.join("Cellar")).filter(|cellar| cellar.is_dir()).collect()
+}
+
+/// Reads a Cellar (`Cellar/<formula>/<version>/`) without running `brew`.
+/// Returns the formulae that can be looked up and the number that cannot.
+fn homebrew_items(cellar: &Path) -> (Vec<SystemItem>, usize) {
+    let subdirs = |dir: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        names.sort();
+        names
+    };
+
+    let mut items = Vec::new();
+    let mut unmatched = 0;
+    for formula in subdirs(cellar) {
+        let versions = subdirs(&cellar.join(&formula));
+        let found: Vec<SystemItem> = versions.iter().filter_map(|version| formula_item(&formula, version)).collect();
+        if found.is_empty() && !versions.is_empty() {
+            unmatched += 1;
+        }
+        items.extend(found);
+    }
+    (items, unmatched)
+}
+
+/// The lookup for one installed formula version, if the formula is known.
+fn formula_item(formula: &str, version: &str) -> Option<SystemItem> {
+    let base = formula.split('@').next()?;
+    let product = FORMULAE.iter().find(|(name, _)| *name == base).map(|(_, product)| *product)?;
+    let version = clean_version(strip_revision(version))?;
+    Some(system_item(Source::Homebrew, formula, &version, format!("cpe:2.3:a:{product}:{version}:*:*:*:*:*:*:*")))
+}
+
+/// Drops Homebrew's own rebuild counter: `8.11.1_2` is upstream `8.11.1`.
+fn strip_revision(version: &str) -> &str {
+    match version.rsplit_once('_') {
+        Some((upstream, revision)) if !revision.is_empty() && revision.bytes().all(|b| b.is_ascii_digit()) => upstream,
+        _ => version,
+    }
+}
+
+fn system_item(source: Source, name: &str, version: &str, cpe: String) -> SystemItem {
     SystemItem {
+        source,
         name: name.to_string(),
         version: version.to_string(),
         cpe,
@@ -319,14 +516,15 @@ fn clean_version(raw: &str) -> Option<String> {
 }
 
 /// The inventory without any lookups (used when `--online` is not given).
-pub fn offline(lockfiles: &[Lockfile], system: Vec<SystemItem>) -> Scan {
+pub fn offline(lockfiles: &[Lockfile], system: System) -> Scan {
     let unique = unique_packages(lockfiles);
     Scan {
         online: false,
         lockfiles: lockfiles.len(),
         packages: unique.len(),
         by_ecosystem: count_ecosystems(&unique),
-        system,
+        system: system.items,
+        unmatched_formulae: system.unmatched_formulae,
         ..Scan::default()
     }
 }
@@ -362,7 +560,8 @@ pub struct Online {
 
 /// Looks everything up. A failing service adds a warning instead of
 /// aborting, so partial results are still shown.
-pub fn scan(lockfiles: &[Lockfile], mut system: Vec<SystemItem>, options: &Online) -> Scan {
+pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
+    let System { items: mut system, unmatched_formulae } = system;
     let mut warnings = Vec::new();
     let unique = unique_packages(lockfiles);
     let packages: Vec<&Package> = unique.keys().copied().collect();
@@ -374,12 +573,22 @@ pub fn scan(lockfiles: &[Lockfile], mut system: Vec<SystemItem>, options: &Onlin
         Vec::new()
     });
 
+    // The dashboard cancels by dropping its end of the progress channel.
+    // Nothing is reported then, so stop before the next round of requests.
+    if progress.cancelled() {
+        return Scan::default();
+    }
+
     // 2. Advisory details (summary, severity, fixed versions).
     let wanted: BTreeMap<&str, &str> = hits.iter().map(|hit| (hit.id.as_str(), hit.modified.as_str())).collect();
-    let advisories = osv_details(&wanted, &options.cache.join("osv"), progress).unwrap_or_else(|err| {
-        warnings.push(format!("OSV advisory download failed: {err}"));
-        BTreeMap::new()
-    });
+    let (advisories, download_error) = osv_details(&wanted, &options.cache.join("osv"), progress);
+    let without_details = wanted.keys().filter(|id| !advisories.contains_key(**id)).count();
+    if without_details > 0 {
+        let reason = download_error.unwrap_or_else(|| "the advisory could not be read".to_string());
+        warnings.push(format!(
+            "Details of {without_details} advisories could not be downloaded ({reason}); they are listed unrated."
+        ));
+    }
 
     // 3. Prioritization data.
     progress.stage("Loading the CISA known-exploited catalog");
@@ -389,16 +598,22 @@ pub fn scan(lockfiles: &[Lockfile], mut system: Vec<SystemItem>, options: &Onlin
     });
     progress.note(format!("{} known-exploited vulnerabilities in the catalog", kev.len()));
     let cves: BTreeSet<&str> = advisories.values().flat_map(|a| a.cves.iter().map(String::as_str)).collect();
-    let epss = epss_lookup(&cves, progress).unwrap_or_else(|err| {
-        warnings.push(format!("EPSS lookup failed: {err}"));
-        BTreeMap::new()
-    });
+    let (epss, epss_error) = epss_lookup(&cves, progress);
+    if let Some(err) = epss_error {
+        warnings.push(format!("EPSS lookup failed for some CVEs ({err}); those are ranked by severity only."));
+    }
 
+    let unavailable = Advisory {
+        cves: Vec::new(),
+        summary: "Advisory details could not be downloaded.".to_string(),
+        severity: Severity::Unknown,
+        fixed: Vec::new(),
+    };
     let mut findings = Vec::new();
     for hit in &hits {
-        let Some(advisory) = advisories.get(hit.id.as_str()) else {
-            continue;
-        };
+        // A hit whose details are missing is still a finding: dropping it
+        // could hide the one advisory that matters.
+        let advisory = advisories.get(hit.id.as_str()).unwrap_or(&unavailable);
         let package = packages[hit.package];
         let paths = &unique[package];
         findings.push(Finding {
@@ -421,7 +636,7 @@ pub fn scan(lockfiles: &[Lockfile], mut system: Vec<SystemItem>, options: &Onlin
     let mut findings = merge_duplicates(findings);
     findings.sort_by(priority);
 
-    // 4. macOS and applications.
+    // 4. macOS, applications and Homebrew formulae.
     nvd_lookup(&mut system, &kev, options, &mut warnings);
 
     Scan {
@@ -431,6 +646,7 @@ pub fn scan(lockfiles: &[Lockfile], mut system: Vec<SystemItem>, options: &Onlin
         by_ecosystem: count_ecosystems(&unique),
         projects: summarize_projects(lockfiles, &findings, &hits, &packages),
         system,
+        unmatched_formulae,
         findings,
         warnings,
     }
@@ -540,46 +756,20 @@ struct OsvHit {
 
 fn osv_query(packages: &[&Package], progress: &Progress) -> Result<Vec<OsvHit>, String> {
     progress.stage(format!("Asking OSV.dev about {} packages", packages.len()));
-    let batches = packages.len().div_ceil(OSV_BATCH);
-    let mut hits = Vec::new();
-    for (chunk_index, chunk) in packages.chunks(OSV_BATCH).enumerate() {
-        let body = osv_request(chunk);
-        let response = crate::npm::post_json(OSV_BATCH_URL, &body)?;
-        hits.extend(parse_osv_batch(&response, chunk.len(), chunk_index * OSV_BATCH)?);
-        progress.step(chunk_index + 1, batches);
-        progress.note(format!("{} advisories match so far", hits.len()));
-    }
-    Ok(hits)
-}
-
-fn osv_request(packages: &[&Package]) -> String {
-    let queries: Vec<Value> = packages
+    let queries: Vec<osv::Query> = packages
         .iter()
-        .map(|p| json!({"package": {"name": p.name, "ecosystem": p.ecosystem}, "version": p.version}))
+        .map(|p| osv::Query { ecosystem: p.ecosystem, name: &p.name, version: &p.version })
         .collect();
-    json!({ "queries": queries }).to_string()
+    let results = osv::query(&queries, |done, total| progress.step(done, total))?;
+    Ok(flatten_hits(results))
 }
 
-/// Results come back in query order, one entry per query.
-fn parse_osv_batch(response: &str, expected: usize, offset: usize) -> Result<Vec<OsvHit>, String> {
-    let value: Value = serde_json::from_str(response).map_err(|err| format!("invalid OSV response: {err}"))?;
-    let results = value.get("results").and_then(Value::as_array).ok_or("OSV response has no `results`")?;
-    if results.len() != expected {
-        return Err(format!("OSV returned {} results for {expected} queries", results.len()));
-    }
-    let mut hits = Vec::new();
-    for (index, result) in results.iter().enumerate() {
-        for vuln in result.get("vulns").and_then(Value::as_array).into_iter().flatten() {
-            if let Some(id) = vuln.get("id").and_then(Value::as_str) {
-                hits.push(OsvHit {
-                    package: offset + index,
-                    id: id.to_string(),
-                    modified: vuln.get("modified").and_then(Value::as_str).unwrap_or_default().to_string(),
-                });
-            }
-        }
-    }
-    Ok(hits)
+fn flatten_hits(results: Vec<Vec<osv::Vuln>>) -> Vec<OsvHit> {
+    results
+        .into_iter()
+        .enumerate()
+        .flat_map(|(package, vulns)| vulns.into_iter().map(move |vuln| OsvHit { package, id: vuln.id, modified: vuln.modified }))
+        .collect()
 }
 
 /// The parts of an OSV advisory the report needs.
@@ -590,7 +780,6 @@ struct Advisory {
     severity: Severity,
     /// (ecosystem, package name, fixed version).
     fixed: Vec<(String, String, String)>,
-    modified: String,
 }
 
 impl Advisory {
@@ -598,11 +787,31 @@ impl Advisory {
         let fixed: BTreeSet<&str> = self
             .fixed
             .iter()
-            .filter(|(ecosystem, name, _)| ecosystem == package.ecosystem && name.eq_ignore_ascii_case(&package.name))
+            .filter(|(ecosystem, name, _)| ecosystem == package.ecosystem && same_package(ecosystem, name, &package.name))
             .map(|(_, _, version)| version.as_str())
             .collect();
         fixed.into_iter().map(str::to_string).collect()
     }
+}
+
+/// Do two names refer to the same package? PyPI treats `-`, `_` and `.` as
+/// the same character and ignores case (PEP 503).
+fn same_package(ecosystem: &str, a: &str, b: &str) -> bool {
+    if ecosystem != "PyPI" {
+        return a.eq_ignore_ascii_case(b);
+    }
+    let normalize = |name: &str| {
+        let mut out = String::new();
+        for c in name.chars() {
+            match c {
+                '-' | '_' | '.' if out.ends_with('-') => {}
+                '-' | '_' | '.' => out.push('-'),
+                _ => out.push(c.to_ascii_lowercase()),
+            }
+        }
+        out
+    };
+    normalize(a) == normalize(b)
 }
 
 fn parse_advisory(text: &str) -> Option<Advisory> {
@@ -645,6 +854,10 @@ fn parse_advisory(text: &str) -> Option<Advisory> {
             continue;
         };
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
+            // `GIT` ranges list commit hashes, not versions a user can install.
+            if range.get("type").and_then(Value::as_str) == Some("GIT") {
+                continue;
+            }
             for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
                 if let Some(version) = event.get("fixed").and_then(Value::as_str) {
                     // `Debian:12` style ecosystems carry a release suffix.
@@ -665,7 +878,6 @@ fn parse_advisory(text: &str) -> Option<Advisory> {
         summary: first_line(summary, 160),
         severity,
         fixed,
-        modified: value.get("modified").and_then(Value::as_str).unwrap_or_default().to_string(),
     })
 }
 
@@ -737,14 +949,16 @@ fn cvss3_score(vector: &str) -> Option<f64> {
 }
 
 /// Returns the advisories for `wanted` (id → last modified), downloading
-/// the ones that are missing from the cache or have changed since.
+/// the ones that are missing from the cache or have changed since. Whatever
+/// could be read is returned together with the download error, if any: the
+/// caller reports the ids that are missing.
 fn osv_details(
     wanted: &BTreeMap<&str, &str>,
     cache: &Path,
     progress: &Progress,
-) -> Result<BTreeMap<String, Advisory>, String> {
+) -> (BTreeMap<String, Advisory>, Option<String>) {
     let file_of = |id: &str| cache.join(format!("{id}.json"));
-    let load = |id: &str| std::fs::read_to_string(file_of(id)).ok().and_then(|text| parse_advisory(&text));
+    let load = |path: &Path| std::fs::read_to_string(path).ok().and_then(|text| parse_advisory(&text));
     // Ids become file names and URL parts; anything unusual is skipped.
     let safe = |id: &str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
 
@@ -763,7 +977,7 @@ fn osv_details(
             continue;
         }
         let fresh = index.get(id).is_some_and(|seen| seen == modified);
-        match load(id).filter(|_| fresh) {
+        match load(&file_of(id)).filter(|_| fresh) {
             Some(advisory) => {
                 advisories.insert(id.to_string(), advisory);
             }
@@ -771,28 +985,36 @@ fn osv_details(
         }
     }
     if missing.is_empty() {
-        return Ok(advisories);
+        return (advisories, None);
     }
 
-    std::fs::create_dir_all(cache).map_err(|err| format!("could not create {}: {err}", cache.display()))?;
+    if let Err(err) = std::fs::create_dir_all(cache) {
+        return (advisories, Some(format!("could not create {}: {err}", cache.display())));
+    }
     progress.stage(format!(
         "Downloading {} advisories ({} already cached)",
         missing.len(),
         advisories.len()
     ));
+    // Downloads go to a `.part` file first, so a failed or half-written
+    // download never replaces (or passes for) a good cached advisory.
+    let part_of = |id: &str| cache.join(format!("{id}.json.part"));
     // One curl process downloads a batch in parallel; the list of URL/output
     // pairs is passed as a config file on stdin. Batches exist only so that
     // progress can be reported between them.
-    let mut status = Ok(String::new());
+    let mut error = None;
     let mut downloaded = 0;
     for batch in missing.chunks(DOWNLOAD_BATCH) {
+        if progress.cancelled() {
+            break;
+        }
         let mut config = String::new();
         for id in batch {
-            let _ = writeln!(config, "url = \"{OSV_VULN_URL}/{id}\"\noutput = \"{}\"", file_of(id).display());
+            let url = format!("{}/{id}", osv::VULN_URL);
+            let _ = writeln!(config, "url = {}\noutput = {}", net::quote(&url), net::quote(&part_of(id).to_string_lossy()));
         }
-        let outcome = run_curl(&["--parallel", "--parallel-max", "16", "--max-time", "300", "--config", "-"], Some(&config));
-        if outcome.is_err() {
-            status = outcome;
+        if let Err(err) = run_curl(&["--parallel", "--parallel-max", "16", "--max-time", "300", "--config", "-"], Some(&config)) {
+            error = Some(err);
         }
         downloaded += batch.len();
         progress.step(downloaded, missing.len());
@@ -800,19 +1022,26 @@ fn osv_details(
     }
 
     for id in missing {
-        if let Some(advisory) = load(id) {
-            advisories.insert(id.to_string(), advisory);
-            index.insert(id.to_string(), wanted[id].to_string());
+        let part = part_of(id);
+        match load(&part) {
+            Some(advisory) if std::fs::rename(&part, file_of(id)).is_ok() => {
+                advisories.insert(id.to_string(), advisory);
+                index.insert(id.to_string(), wanted[id].to_string());
+            }
+            _ => {
+                let _ = std::fs::remove_file(&part);
+                // An older copy is better than nothing, but it stays marked
+                // as outdated so the next run tries again.
+                if let Some(advisory) = load(&file_of(id)) {
+                    advisories.insert(id.to_string(), advisory);
+                }
+            }
         }
     }
     if let Ok(text) = serde_json::to_string(&index) {
         store(&index_path, &text);
     }
-    // Partial downloads still give partial results; only a total failure is an error.
-    match status {
-        Err(err) if advisories.is_empty() => Err(err),
-        _ => Ok(advisories),
-    }
+    (advisories, error)
 }
 
 // ---- CISA KEV ----
@@ -826,20 +1055,18 @@ struct KevEntry {
 /// Loads the KEV catalog, refreshing the cached copy once a day.
 fn load_kev(cache: &Path) -> Result<BTreeMap<String, KevEntry>, String> {
     let path = cache.join("kev.json");
-    if let Some(text) = read_fresh(&path) {
-        return parse_kev(&text);
+    // A fresh copy that no longer parses is downloaded again.
+    if let Some(parsed) = read_fresh(&path).and_then(|text| parse_kev(&text).ok()) {
+        return Ok(parsed);
     }
-    match http_get(KEV_URL, &[]) {
-        Ok(text) => {
-            let parsed = parse_kev(&text)?;
+    let downloaded = net::get(KEV_URL, &[]).and_then(|text| parse_kev(&text).map(|parsed| (parsed, text)));
+    match downloaded {
+        Ok((parsed, text)) => {
             store(&path, &text);
             Ok(parsed)
         }
         // A stale catalog is better than none.
-        Err(err) => match std::fs::read_to_string(&path) {
-            Ok(text) => parse_kev(&text),
-            Err(_) => Err(err),
-        },
+        Err(err) => std::fs::read_to_string(&path).ok().and_then(|text| parse_kev(&text).ok()).ok_or(err),
     }
 }
 
@@ -862,16 +1089,25 @@ fn parse_kev(text: &str) -> Result<BTreeMap<String, KevEntry>, String> {
 
 // ---- EPSS ----
 
-fn epss_lookup(cves: &BTreeSet<&str>, progress: &Progress) -> Result<BTreeMap<String, f64>, String> {
+/// Returns the scores that could be fetched and the first error, if any:
+/// one failed request must not throw away the scores already received.
+fn epss_lookup(cves: &BTreeSet<&str>, progress: &Progress) -> (BTreeMap<String, f64>, Option<String>) {
     progress.stage(format!("Fetching exploit probabilities (EPSS) for {} CVEs", cves.len()));
     let cves: Vec<&str> = cves.iter().copied().collect();
     let mut scores = BTreeMap::new();
+    let mut error = None;
     for (index, chunk) in cves.chunks(EPSS_BATCH).enumerate() {
+        if progress.cancelled() {
+            break;
+        }
         let url = format!("{EPSS_URL}?cve={}&limit={EPSS_BATCH}", chunk.join(","));
-        scores.extend(parse_epss(&http_get(&url, &[])?)?);
+        match net::get(&url, &[]).and_then(|text| parse_epss(&text)) {
+            Ok(found) => scores.extend(found),
+            Err(err) => error = error.or(Some(err)),
+        }
         progress.step((index * EPSS_BATCH + chunk.len()).min(cves.len()), cves.len());
     }
-    Ok(scores)
+    (scores, error)
 }
 
 /// EPSS returns numbers as strings: `{"cve": "CVE-…", "epss": "0.20158"}`.
@@ -887,7 +1123,7 @@ fn parse_epss(text: &str) -> Result<BTreeMap<String, f64>, String> {
         .collect())
 }
 
-// ---- NVD (macOS and applications) ----
+// ---- NVD (macOS, applications and Homebrew formulae) ----
 
 /// Asks the NVD which known-exploited CVEs affect each product version.
 /// Without an API key the NVD allows 5 requests per 30 seconds, so uncached
@@ -899,13 +1135,18 @@ fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, option
     let cache = options.cache.join("nvd");
     let total = items.len();
     let mut requested = false;
-    options.progress.stage(format!("Checking macOS and {} apps in the NVD", total.saturating_sub(1)));
+    options.progress.stage(format!("Checking {total} system products in the NVD"));
 
     for (index, item) in items.iter_mut().enumerate() {
-        let file: String = item.cpe.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' }).collect();
-        let path = cache.join(format!("{file}.json"));
-        let text = match read_fresh(&path) {
-            Some(text) => Ok(text),
+        if options.progress.cancelled() {
+            return;
+        }
+        let path = cache.join(format!("{}.json", cache_name(&item.cpe)));
+        // Only answers that parse are cached, so a proxy error page or an
+        // empty body is retried on the next run instead of for a whole day.
+        let cached = read_fresh(&path).and_then(|text| parse_nvd(&text, kev).ok());
+        let exploited = match cached {
+            Some(exploited) => Ok(exploited),
             None => {
                 options.progress.note(format!("{} {}", item.name, item.version));
                 if requested {
@@ -915,10 +1156,14 @@ fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, option
                 }
                 requested = true;
                 let url = format!("{NVD_URL}?cpeName={}&isVulnerable&hasKev", item.cpe);
-                http_get(&url, &headers).inspect(|text| store(&path, text))
+                net::get(&url, &headers).and_then(|text| {
+                    let exploited = parse_nvd(&text, kev)?;
+                    store(&path, &text);
+                    Ok(exploited)
+                })
             }
         };
-        match text.and_then(|text| parse_nvd(&text, kev)) {
+        match exploited {
             Ok(exploited) => {
                 item.checked = true;
                 item.exploited = exploited;
@@ -959,34 +1204,18 @@ fn parse_nvd(text: &str, kev: &BTreeMap<String, KevEntry>) -> Result<Vec<SystemV
 
 // ---- HTTP and cache helpers ----
 
-fn http_get(url: &str, headers: &[String]) -> Result<String, String> {
-    let mut args = vec!["--location", "--max-time", "60"];
-    for header in headers {
-        args.extend(["--header", header.as_str()]);
+/// A file name for a cache key. Every character outside `[A-Za-z0-9.-]` is
+/// written as `_xx` (hex), so two different keys never share a file.
+fn cache_name(key: &str) -> String {
+    let mut name = String::new();
+    for byte in key.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
+            name.push(byte as char);
+        } else {
+            let _ = write!(name, "_{byte:02x}");
+        }
     }
-    args.push(url);
-    run_curl(&args, None)
-}
-
-/// Runs `curl` quietly; fails on HTTP errors. `stdin` feeds `--config -`.
-fn run_curl(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
-    let mut child = Command::new("curl")
-        .args(["--silent", "--show-error", "--fail"])
-        .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("could not run `curl`: {err}"))?;
-    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input.as_bytes()).map_err(|err| format!("could not send the request: {err}"))?;
-    }
-    let output = child.wait_with_output().map_err(|err| format!("could not wait for `curl`: {err}"))?;
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr);
-        return Err(message.lines().last().unwrap_or("curl failed").trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    name
 }
 
 /// Reads a cache file if it is younger than `CACHE_TTL`.
@@ -1053,7 +1282,10 @@ impl VulnReport {
 
         if !scan.online {
             for item in &scan.system {
-                let _ = writeln!(out, "  {} {}", item.name, item.version.dimmed());
+                let _ = writeln!(out, "  {}", item.title());
+            }
+            if let Some(note) = scan.unmatched_note() {
+                let _ = writeln!(out, "  {}", note.dimmed());
             }
             let _ = writeln!(out);
             let _ = writeln!(
@@ -1066,7 +1298,7 @@ impl VulnReport {
 
         let _ = writeln!(out, "{}", "SYSTEM  (known-exploited vulnerabilities affecting the installed version)".bold());
         for item in &scan.system {
-            let title = format!("{} {}", item.name, item.version);
+            let title = item.title();
             if let Some(error) = &item.error {
                 let _ = writeln!(out, "  {} {title:<34} {}", "?".yellow(), format!("lookup failed: {error}").dimmed());
             } else if item.exploited.is_empty() {
@@ -1090,9 +1322,12 @@ impl VulnReport {
         if scan.system.is_empty() {
             let _ = writeln!(out, "  {}", "not scanned".dimmed());
         }
+        if let Some(note) = scan.unmatched_note() {
+            let _ = writeln!(out, "  {}", note.dimmed());
+        }
         let _ = writeln!(out, "{rule}");
 
-        let exploited = scan.findings.iter().filter(|f| f.kev.is_some() || f.malware).count();
+        let exploited = scan.exploited_dependencies();
         let _ = writeln!(
             out,
             "{}  {} findings: {} critical · {} high · {} medium · {} low · {} unrated · {}",
@@ -1195,7 +1430,7 @@ impl VulnReport {
         let _ = writeln!(
             out,
             "{}",
-            "Findings are ranked: known-exploited (KEV) first, then exploit probability (EPSS), then severity.\nApplications are matched by name in the NVD; only well-known apps are covered.".dimmed()
+            "Findings are ranked: known-exploited (KEV) first, then exploit probability (EPSS), then severity.\nApplications and Homebrew formulae are matched by name in the NVD; only well-known ones are covered.".dimmed()
         );
         out.trim_end().to_string()
     }
@@ -1249,21 +1484,49 @@ mod tests {
     }
 
     #[test]
-    fn osv_batch_maps_results_to_queries() {
-        let (a, b) = (package("a", "1.0.0"), package("b", "2.0.0"));
-        let request: Value = serde_json::from_str(&osv_request(&[&a, &b])).unwrap();
-        assert_eq!(request["queries"][1]["package"]["name"], "b");
-        assert_eq!(request["queries"][1]["package"]["ecosystem"], "npm");
-        assert_eq!(request["queries"][1]["version"], "2.0.0");
-
-        let response = r#"{"results": [{}, {"vulns": [{"id": "GHSA-x", "modified": "2025-01-01T00:00:00Z"}, {"id": "MAL-1"}]}]}"#;
-        let hits = parse_osv_batch(response, 2, 1000).unwrap();
+    fn osv_results_become_hits_per_package() {
+        let vuln = |id: &str, modified: &str| osv::Vuln { id: id.to_string(), modified: modified.to_string() };
+        let hits = flatten_hits(vec![vec![], vec![vuln("GHSA-x", "2025-01-01T00:00:00Z"), vuln("MAL-1", "")]]);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0], OsvHit { package: 1001, id: "GHSA-x".to_string(), modified: "2025-01-01T00:00:00Z".to_string() });
-        assert_eq!(hits[1].modified, "");
+        assert_eq!(hits[0], OsvHit { package: 1, id: "GHSA-x".to_string(), modified: "2025-01-01T00:00:00Z".to_string() });
+        assert_eq!((hits[1].package, hits[1].id.as_str()), (1, "MAL-1"));
+    }
 
-        assert!(parse_osv_batch(response, 3, 0).is_err(), "result count must match");
-        assert!(parse_osv_batch("not json", 1, 0).is_err());
+    #[test]
+    fn fixed_versions_skip_commits_and_match_pypi_spellings() {
+        let text = r#"{"id": "PYSEC-1", "affected": [
+            {"package": {"name": "Typing_Extensions", "ecosystem": "PyPI"},
+             "ranges": [{"type": "GIT", "events": [{"fixed": "0123456789abcdef0123456789abcdef01234567"}]},
+                        {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "4.1.0"}]}]}]}"#;
+        let advisory = parse_advisory(text).unwrap();
+        let installed = Package { ecosystem: "PyPI", name: "typing-extensions".to_string(), version: "4.0.0".to_string() };
+        assert_eq!(advisory.fixed_for(&installed), ["4.1.0"]);
+        assert!(same_package("PyPI", "zope.interface", "Zope_Interface"));
+        assert!(!same_package("npm", "left-pad", "left_pad"), "only PyPI folds separators");
+    }
+
+    #[test]
+    fn cache_names_never_collide() {
+        assert_eq!(cache_name("cpe:2.3:a:x:y:1.0-1"), "cpe_3a2.3_3aa_3ax_3ay_3a1.0-1");
+        assert_ne!(cache_name("a:signal-desktop:1.0-1"), cache_name("a:signal_desktop:1.0_1"));
+        assert_ne!(cache_name("a_3a"), cache_name("a:"));
+    }
+
+    #[test]
+    fn cached_advisories_are_used_only_while_current() {
+        let cache = std::env::temp_dir().join(format!("macos-audit-osv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("GHSA-1.json"), r#"{"id": "GHSA-1", "summary": "cached"}"#).unwrap();
+        std::fs::write(cache.join("index.json"), r#"{"GHSA-1": "t1"}"#).unwrap();
+
+        // Unchanged since it was cached: no download is attempted.
+        let wanted = BTreeMap::from([("GHSA-1", "t1"), ("../evil", "t1")]);
+        let (advisories, error) = osv_details(&wanted, &cache, &Progress::none());
+        std::fs::remove_dir_all(&cache).unwrap();
+        assert_eq!(error, None);
+        assert_eq!(advisories.keys().collect::<Vec<_>>(), ["GHSA-1"], "unsafe ids are never used as paths");
+        assert_eq!(advisories["GHSA-1"].summary, "cached");
     }
 
     #[test]
@@ -1354,6 +1617,51 @@ mod tests {
     }
 
     #[test]
+    fn homebrew_formulae_map_to_nvd_products() {
+        let item = formula_item("openssl@3", "3.4.0_1").unwrap();
+        assert_eq!(item.source, Source::Homebrew);
+        assert_eq!(item.cpe, "cpe:2.3:a:openssl:openssl:3.4.0:*:*:*:*:*:*:*");
+        assert_eq!(item.title(), "openssl@3 3.4.0 (Homebrew)");
+
+        assert!(formula_item("not-a-known-formula", "1.0").is_none());
+        assert!(formula_item("curl", "HEAD-1a2b3c4").is_none(), "a build from git has no version to look up");
+        assert_eq!(strip_revision("8.11.1_2"), "8.11.1");
+        assert_eq!(strip_revision("1.0_beta"), "1.0_beta");
+        assert_eq!(strip_revision("7.1"), "7.1");
+    }
+
+    #[test]
+    fn formula_table_is_well_formed() {
+        let mut names = BTreeSet::new();
+        for (formula, product) in FORMULAE {
+            assert!(names.insert(formula), "{formula} is listed twice");
+            assert!(!formula.contains('@'), "{formula}: list the unversioned name");
+            let parts: Vec<&str> = product.split(':').collect();
+            assert_eq!(parts.len(), 2, "{product} must be vendor:product");
+            assert!(parts.iter().all(|part| !part.is_empty() && !part.contains(['*', '?', ' ', '/'])), "{product}");
+            assert_eq!(*product, product.to_lowercase(), "CPE names are lowercase");
+        }
+    }
+
+    #[test]
+    fn cellar_is_read_without_running_brew() {
+        let cellar = std::env::temp_dir().join(format!("macos-audit-cellar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cellar);
+        for dir in ["curl/8.11.1_1", "openssl@3/3.4.0", "openssl@3/3.3.2", "some-private-tool/0.1.0", "empty", "curl/.metadata"] {
+            std::fs::create_dir_all(cellar.join(dir)).unwrap();
+        }
+        std::fs::write(cellar.join("stray-file"), "").unwrap();
+
+        let (items, unmatched) = homebrew_items(&cellar);
+        std::fs::remove_dir_all(&cellar).unwrap();
+
+        let titles: Vec<String> = items.iter().map(SystemItem::title).collect();
+        assert_eq!(titles, ["curl 8.11.1 (Homebrew)", "openssl@3 3.3.2 (Homebrew)", "openssl@3 3.4.0 (Homebrew)"]);
+        assert_eq!(unmatched, 1, "only the installed formula that is not in the table counts");
+        assert_eq!(homebrew_items(&cellar), (Vec::new(), 0), "a missing Cellar is not an error");
+    }
+
+    #[test]
     fn findings_are_ranked_by_exploitation_then_probability_then_severity() {
         let mut findings = vec![
             finding("low-risk-critical", Severity::Critical, Some(0.001), false),
@@ -1398,7 +1706,7 @@ mod tests {
             lockfile("/b/package-lock.json", &[shared.clone()]),
             lockfile("/c/Cargo.lock", &[cargo]),
         ];
-        let scan = offline(&lockfiles, vec![system_item("macOS", "15.0", "cpe".to_string())]);
+        let scan = offline(&lockfiles, System { items: vec![system_item(Source::Os, "macOS", "15.0", "cpe".to_string())], unmatched_formulae: 4 });
         assert!(!scan.online);
         assert_eq!((scan.lockfiles, scan.packages), (3, 3));
         assert_eq!(scan.by_ecosystem, BTreeMap::from([("crates.io", 1), ("npm", 2)]));
@@ -1406,7 +1714,8 @@ mod tests {
 
         let text = VulnReport::new("now".to_string(), scan).to_text();
         assert!(text.contains("--online"));
-        assert!(text.contains("macOS"));
+        assert!(text.contains("macOS 15.0"));
+        assert!(text.contains("4 other Homebrew formulae"));
     }
 
     #[test]
@@ -1422,7 +1731,7 @@ mod tests {
         scan.system = vec![SystemItem {
             exploited: vec![SystemVuln { cve: "CVE-2025-1".to_string(), name: "Browser bug".to_string(), date_added: "2025-01-01".to_string() }],
             checked: true,
-            ..system_item("Browser", "1.0", "cpe".to_string())
+            ..system_item(Source::App, "Browser", "1.0", "cpe".to_string())
         }];
         assert_eq!(scan.exploited(), 2);
 

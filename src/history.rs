@@ -95,7 +95,15 @@ pub fn append(path: &Path, mut records: Vec<RunRecord>, record: RunRecord) -> Re
             .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
-    std::fs::write(path, json).map_err(|err| format!("could not write {}: {err}", path.display()))
+    // Write a sibling file and rename it over the old one: a crash or a
+    // second run at the same moment never leaves a half-written history.
+    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&temp, json)
+        .and_then(|()| std::fs::rename(&temp, path))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&temp);
+            format!("could not write {}: {err}", path.display())
+        })
 }
 
 /// Checks whose status changed between the previous record and the current

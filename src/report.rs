@@ -37,6 +37,9 @@ pub struct Report {
     pub os_version: String,
     pub score: u32,
     pub grade: &'static str,
+    /// `false` when no check could be evaluated (all unknown or exempt):
+    /// the score is then a placeholder, shown as "n/a".
+    pub scorable: bool,
     pub summary: Summary,
     pub previous: Option<Previous>,
     pub changes: Vec<Change>,
@@ -51,14 +54,16 @@ impl Report {
         checks: Vec<CheckResult>,
         previous: Option<&RunRecord>,
     ) -> Self {
-        let score = score::calculate_score(&checks);
+        let scored = score::score_if_scorable(&checks);
+        let score = scored.unwrap_or(score::NOTHING_SCORABLE);
         Self {
             tool: env!("CARGO_PKG_NAME"),
             version: env!("CARGO_PKG_VERSION"),
             timestamp,
             os_version,
             score,
-            grade: score::grade(score),
+            grade: if scored.is_some() { score::grade(score) } else { "n/a" },
+            scorable: scored.is_some(),
             summary: Summary::from_results(&checks),
             previous: previous.map(|record| Previous {
                 timestamp: record.timestamp.clone(),
@@ -69,6 +74,11 @@ impl Report {
                 .unwrap_or_default(),
             checks,
         }
+    }
+
+    /// "87/100", or "n/a" when no check could be evaluated.
+    fn score_label(&self) -> String {
+        if self.scorable { format!("{}/100", self.score) } else { "n/a".to_string() }
     }
 
     /// Fail/Warn checks that have no exception defined.
@@ -92,7 +102,7 @@ impl Report {
     }
 
     fn to_text_quiet(&self) -> String {
-        format!("{}/100 ({})", self.score, self.grade)
+        format!("{} ({})", self.score_label(), self.grade)
     }
 
     fn to_text(&self) -> String {
@@ -118,10 +128,11 @@ impl Report {
         let _ = writeln!(out);
         let _ = writeln!(out, "{rule}");
 
-        let score_text = format!("{}/100", self.score);
-        let score_text = match self.score {
-            90.. => score_text.green().bold(),
-            60..=89 => score_text.yellow().bold(),
+        let score_text = self.score_label();
+        let score_text = match (self.scorable, self.score) {
+            (false, _) => score_text.yellow().bold(),
+            (true, 90..) => score_text.green().bold(),
+            (true, 60..=89) => score_text.yellow().bold(),
             _ => score_text.red().bold(),
         };
         let summary = &self.summary;
@@ -175,7 +186,11 @@ impl Report {
             let _ = writeln!(
                 out,
                 "{}",
-                "Great! All audited safeguards are in place.".green()
+                if self.scorable {
+                    "Great! All audited safeguards are in place.".green()
+                } else {
+                    "No check could be evaluated, so there is nothing to score.".yellow()
+                }
             );
         } else {
             let _ = writeln!(out, "{}", "Recommendations".bold());
@@ -188,16 +203,17 @@ impl Report {
                     format!("[{}]", meta(issue)).dimmed(),
                     issue.advice
                 );
+                if let Some(fix) = &issue.fix {
+                    let _ = writeln!(out, "      {} {}", "Run:".dimmed(), fix.command_line().cyan());
+                }
             }
-            if self.issues().any(|issue| issue.fix.is_some()) {
-                let _ = writeln!(out);
-                let _ = writeln!(
-                    out,
-                    "{}",
-                    "Some issues can be fixed automatically: preview with `macos-audit --fix --dry-run`."
-                        .dimmed()
-                );
-            }
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "{}",
+                "This tool changes nothing on your Mac: apply the recommendations yourself, then run it again."
+                    .dimmed()
+            );
         }
 
         let _ = writeln!(out);
@@ -216,8 +232,8 @@ impl Report {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "**Score: {}/100 (Grade: {})** · {} · {}",
-            self.score,
+            "**Score: {} (Grade: {})** · {} · {}",
+            self.score_label(),
             self.grade,
             self.os_version,
             short_time(&self.timestamp)
@@ -233,7 +249,7 @@ impl Report {
                 check.name,
                 check.severity.label(),
                 check.cis.unwrap_or("–"),
-                detail_with_exemption(check).replace('|', "\\|")
+                markdown_cell(&detail_with_exemption(check))
             );
         }
 
@@ -266,6 +282,9 @@ impl Report {
             let _ = writeln!(out);
             for issue in issues {
                 let _ = writeln!(out, "- **{}**: {}", issue.name, issue.advice);
+                if let Some(fix) = &issue.fix {
+                    let _ = writeln!(out, "  - Run: `{}`", fix.command_line());
+                }
             }
         }
         out
@@ -296,9 +315,10 @@ impl Report {
         for issue in self.issues() {
             let _ = writeln!(
                 advice,
-                "<li><strong>{}</strong>: {}</li>",
+                "<li><strong>{}</strong>: {}{}</li>",
                 escape_html(issue.name),
-                escape_html(issue.advice)
+                escape_html(issue.advice),
+                issue.fix.map(|fix| format!("<br>Run: <code>{}</code>", escape_html(&fix.command_line()))).unwrap_or_default()
             );
         }
         let advice = if advice.is_empty() {
@@ -450,6 +470,12 @@ pub fn short_time(timestamp: &str) -> String {
     timestamp.chars().take(16).collect::<String>().replace('T', " ")
 }
 
+/// Makes text safe for a Markdown table cell: a `|` or a line break would
+/// end the cell or the whole row.
+fn markdown_cell(text: &str) -> String {
+    text.replace('|', "\\|").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Escapes special characters in text that will be embedded in HTML.
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -462,6 +488,11 @@ fn escape_html(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::score::tests::result;
+
+    #[test]
+    fn markdown_cells_stay_on_one_row() {
+        assert_eq!(markdown_cell("a|b\nline two\r\n  three"), "a\\|b line two three");
+    }
 
     fn sample() -> Report {
         let before = [

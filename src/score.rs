@@ -3,34 +3,54 @@
 use crate::checks::{CheckResult, Status};
 use serde::Serialize;
 
+/// The score reported when no check could be scored.
+///
+/// A run in which every check is Unknown or exempt found no weakness, so it
+/// must not look like a failing score (0 / grade F) nor trip `--min-score`.
+/// Callers that want to show "n/a" instead can use `score_if_scorable`.
+pub const NOTHING_SCORABLE: u32 = 100;
+
 /// Calculates the weighted score (0-100).
 ///
 /// Pass = full points, Warn = half points, Fail = 0 points.
 /// Unknown and exempted checks are left out of the denominator, so a state
 /// that could not be determined or was knowingly accepted does not lower the
-/// score.
+/// score. If that leaves nothing to score, `NOTHING_SCORABLE` is returned.
 pub fn calculate_score(results: &[CheckResult]) -> u32 {
-    let mut earned: u32 = 0;
-    let mut possible: u32 = 0;
+    score_if_scorable(results).unwrap_or(NOTHING_SCORABLE)
+}
+
+/// Like `calculate_score`, but `None` when there is nothing to score: every
+/// check is Unknown, exempt or has weight 0 (or the list is empty).
+pub fn score_if_scorable(results: &[CheckResult]) -> Option<u32> {
+    // u64 with saturating arithmetic: no combination of weights can overflow.
+    let mut earned: u64 = 0;
+    let mut possible: u64 = 0;
 
     for result in results.iter().filter(|result| result.exempt.is_none()) {
+        // We multiply everything by 2 so half points stay integers.
+        let full = u64::from(result.weight).saturating_mul(2);
         match result.status {
             Status::Pass => {
-                // We multiply everything by 2 so half points stay integers.
-                earned += result.weight * 2;
-                possible += result.weight * 2;
+                earned = earned.saturating_add(full);
+                possible = possible.saturating_add(full);
             }
             Status::Warn => {
-                earned += result.weight;
-                possible += result.weight * 2;
+                earned = earned.saturating_add(u64::from(result.weight));
+                possible = possible.saturating_add(full);
             }
-            Status::Fail => possible += result.weight * 2,
+            Status::Fail => possible = possible.saturating_add(full),
             Status::Unknown => {}
         }
     }
 
-    // If `possible` is zero, `earned` is zero too; max(1) prevents division by zero.
-    earned * 100 / possible.max(1)
+    if possible == 0 {
+        return None;
+    }
+    // `earned <= possible`, so the quotient is at most 100; the product is
+    // computed in u128 so it cannot overflow either.
+    let score = u128::from(earned) * 100 / u128::from(possible);
+    Some(u32::try_from(score).unwrap_or(100))
 }
 
 /// The letter grade for a score.
@@ -131,8 +151,41 @@ pub mod tests {
     }
 
     #[test]
-    fn empty_list_does_not_divide_by_zero() {
-        assert_eq!(calculate_score(&[]), 0);
+    fn nothing_scorable_is_not_a_failing_score() {
+        // Empty list: no division by zero, and no grade F.
+        assert_eq!(score_if_scorable(&[]), None);
+        assert_eq!(calculate_score(&[]), NOTHING_SCORABLE);
+
+        // `--only airdrop` on a machine where the check is Unknown.
+        let unknown = [result("airdrop", Status::Unknown, 5)];
+        assert_eq!(score_if_scorable(&unknown), None);
+        assert!(calculate_score(&unknown) >= 1, "must satisfy --min-score 1");
+        assert_ne!(grade(calculate_score(&unknown)), "F");
+
+        // Everything exempt.
+        let mut exempt = result("ssh", Status::Fail, 10);
+        exempt.exempt = Some("reason".into());
+        assert_eq!(score_if_scorable(&[exempt]), None);
+
+        // A real failure is still a zero.
+        let failing = [result("a", Status::Fail, 10), result("b", Status::Unknown, 5)];
+        assert_eq!(score_if_scorable(&failing), Some(0));
+        assert_eq!(calculate_score(&failing), 0);
+    }
+
+    #[test]
+    fn huge_weights_do_not_overflow() {
+        // The configuration rejects these, but the arithmetic must hold anyway.
+        let results = [
+            result("a", Status::Pass, u32::MAX),
+            result("b", Status::Warn, u32::MAX),
+            result("c", Status::Fail, 1 << 31),
+        ];
+        // earned = 3 * MAX, possible = 4 * MAX + 2^32: just under 60 %.
+        assert_eq!(calculate_score(&results), 59);
+
+        let zero_weight = [result("a", Status::Fail, 0)];
+        assert_eq!(score_if_scorable(&zero_weight), None);
     }
 
     #[test]

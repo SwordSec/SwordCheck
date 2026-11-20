@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 
 /// What the dashboard needs from the command line and configuration.
 pub struct Setup {
+    /// Save full audits to the history and compare with the previous one
+    /// (off for partial runs and with `--no-history`).
+    pub save_history: bool,
     /// Ids of the checks to run (after `--only` / `--skip`).
     pub check_ids: Vec<String>,
     pub config: Config,
@@ -78,7 +81,7 @@ impl Module {
                 "Read-only. Takes a few seconds.",
             ],
             Module::Vulns => &[
-                "Reads the lockfiles of your projects (Cargo, npm, yarn, pnpm, Python, Composer, Bundler, Go) and lists macOS plus well-known apps.",
+                "Reads the lockfiles of your projects (Cargo, npm, yarn, pnpm, Python, Composer, Bundler, Go) and lists macOS plus well-known apps and Homebrew formulae.",
                 "",
                 "With online lookups: asks OSV.dev and the NVD which known vulnerabilities affect those versions, then ranks them with CISA KEV (exploited in the wild) and EPSS (exploit probability).",
                 "",
@@ -173,15 +176,17 @@ impl ResultView {
 struct AuditView {
     results: Vec<CheckResult>,
     list: ListState,
+    /// Comparison with the previous audit, or why there is none.
+    trend: Option<String>,
 }
 
 impl AuditView {
-    fn new(results: Vec<CheckResult>) -> Self {
+    fn new(results: Vec<CheckResult>, trend: Option<String>) -> Self {
         let mut list = ListState::default();
         if !results.is_empty() {
             list.select(Some(0));
         }
-        Self { results, list }
+        Self { results, list, trend }
     }
 
     fn selected(&self) -> Option<&CheckResult> {
@@ -207,7 +212,7 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
     let mut rows = Vec::new();
 
     for item in &scan.system {
-        let title = format!("{} {}", item.name, item.version);
+        let title = item.title();
         let mut detail = vec![Detail::Heading(title.clone()), Detail::Dim(item.cpe.clone()), Detail::Blank];
         let (tag, tone) = if !scan.online {
             detail.push(Detail::Text("Not looked up yet. Enable online lookups on the home screen and run again.".into()));
@@ -257,7 +262,7 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
         if !finding.cves.is_empty() {
             detail.push(Detail::Text(format!("CVE        {}", finding.cves.join(", "))));
         }
-        detail.push(Detail::Text(format!("Severity   {:?}", finding.severity)));
+        detail.push(Detail::Text(format!("Severity   {}", finding.severity.label())));
         if let Some(epss) = finding.epss {
             detail.push(Detail::Text(format!("EPSS       {:.1}% chance of exploitation in 30 days", epss * 100.0)));
         }
@@ -298,11 +303,14 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
     } else {
         headline.push((Tone::Warn, "Inventory only: online lookups are off (press esc, then o).".into()));
     }
+    headline.extend(scan.unmatched_note().map(|note| (Tone::Dim, note)));
     headline.extend(scan.warnings.iter().map(|warning| (Tone::Warn, warning.clone())));
     ResultView::new(Module::Vulns, headline, rows, "Nothing to scan: no lockfiles or known apps were found.")
 }
 
-fn npm_view(scan: &npm::Scan, online: bool) -> ResultView {
+/// `lookup` is `None` when online lookups are off, otherwise whether the
+/// OSV query worked.
+fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView {
     let rows = scan
         .findings
         .iter()
@@ -334,14 +342,21 @@ fn npm_view(scan: &npm::Scan, online: bool) -> ResultView {
         .collect();
 
     let malware = scan.malware().count();
-    let source = if online { "built-in list + OSV.dev" } else { "built-in list only (online lookups are off)" };
-    let headline = vec![
+    let source = match &lookup {
+        Some(Ok(())) => "built-in list + OSV.dev",
+        Some(Err(_)) => "built-in list only",
+        None => "built-in list only (online lookups are off)",
+    };
+    let mut headline = vec![
         (Tone::Plain, format!("{} directories · {} package installs · {source}", scan.roots.len(), scan.packages)),
         (
             if malware > 0 { Tone::Bad } else { Tone::Good },
             format!("{malware} malicious · {} suspicious install scripts", scan.suspicious().count()),
         ),
     ];
+    if let Some(Err(err)) = lookup {
+        headline.push((Tone::Warn, format!("OSV lookup failed, so the scan is incomplete: {err}")));
+    }
     ResultView::new(Module::Npm, headline, rows, "No malicious or suspicious packages found.")
 }
 
@@ -403,7 +418,7 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
 
     let tracked = scan.tracked().count();
     let providers: Vec<String> = scan.summary.iter().map(|row| format!("{} {}", row.provider, row.secrets)).collect();
-    let headline = vec![
+    let mut headline = vec![
         (
             Tone::Plain,
             format!("{} files · {} secrets · {} locations", scan.files_scanned, scan.unique_secrets(), scan.findings.len()),
@@ -413,6 +428,9 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
             if tracked > 0 { format!("{tracked} in git-tracked files · {}", providers.join(" · ")) } else { providers.join(" · ") },
         ),
     ];
+    if scan.files_skipped > 0 {
+        headline.push((Tone::Warn, format!("{} files skipped, not scanned: {}", scan.files_skipped, scan.skipped.reasons())));
+    }
     ResultView::new(Module::Secrets, headline, rows, "No secrets found.")
 }
 
@@ -420,7 +438,8 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
 
 /// What a finished job hands back.
 enum Outcome {
-    Audit(Vec<CheckResult>),
+    /// The results and the comparison with the previous audit.
+    Audit(Vec<CheckResult>, Option<String>),
     View(ResultView),
 }
 
@@ -507,12 +526,15 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
         Module::Audit => {
             let mut checks = checks::registry();
             checks.retain(|check| setup.check_ids.iter().any(|id| id == check.id()));
-            Outcome::Audit(checks::run_checks_with(&checks, &runner, &setup.config, progress))
+            let results = checks::run_checks_with(&checks, &runner, &setup.config, progress);
+            // A cancelled audit is not a result worth recording.
+            let trend = (setup.save_history && !progress.cancelled()).then(|| record_audit(&results, &setup.os_version));
+            Outcome::Audit(results, trend)
         }
         Module::Vulns => {
             progress.stage("Looking for lockfiles in your projects");
             let paths = lockfiles::default_files();
-            progress.stage("Listing macOS and installed applications");
+            progress.stage("Listing macOS, installed applications and Homebrew formulae");
             let system = vulns::system_items(&runner);
             let lockfiles = vulns::read_lockfiles(&paths, progress);
             let cache = history::history_path().and_then(|path| path.parent().map(|dir| dir.join("cache")));
@@ -528,23 +550,42 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             progress.stage("Looking for node_modules directories");
             let roots = npm::all_roots(&runner);
             let mut scan = npm::scan_with(&roots, progress);
-            let mut looked_up = false;
-            if online {
-                match npm::osv_lookup_with(&scan.installed, progress) {
-                    Ok(hits) => {
-                        scan.add_osv(hits);
-                        looked_up = true;
-                    }
-                    Err(err) => progress.note(format!("OSV lookup failed: {err}")),
-                }
-            }
-            Outcome::View(npm_view(&scan, looked_up))
+            let lookup = online.then(|| npm::osv_lookup_with(&scan.installed, progress).map(|hits| scan.add_osv(hits)));
+            Outcome::View(npm_view(&scan, lookup))
         }
         Module::Secrets => {
             progress.stage("Looking for files that may hold secrets");
             let files = secrets::default_files();
             Outcome::View(secrets_view(&secrets::scan_with(&files, progress)))
         }
+    }
+}
+
+/// Saves a dashboard audit to the history, like the command line does, and
+/// describes how it compares with the previous one.
+fn record_audit(results: &[CheckResult], os_version: &str) -> String {
+    let Some(path) = history::history_path() else {
+        return "history unavailable (HOME is not set)".to_string();
+    };
+    let records = match history::load(&path) {
+        Ok(records) => records,
+        // A corrupt history is left alone rather than overwritten.
+        Err(err) => return format!("history unavailable: {err}"),
+    };
+    let score = score::calculate_score(results);
+    let trend = match records.last() {
+        None => "first recorded audit".to_string(),
+        Some(previous) => {
+            let changed = history::diff(previous, results).len();
+            let delta = i64::from(score) - i64::from(previous.score);
+            format!("previous {} ({delta:+}), {changed} changed", previous.score)
+        }
+    };
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let record = history::RunRecord::new(timestamp, os_version.to_string(), score, results);
+    match history::append(&path, records, record) {
+        Ok(()) => trend,
+        Err(err) => format!("{trend}; not saved: {err}"),
     }
 }
 
@@ -599,7 +640,7 @@ impl App {
             // Events sent just before the thread ended are still queued.
             job.pump();
             self.screen = match outcome {
-                Ok(Outcome::Audit(results)) => Screen::Audit(AuditView::new(results)),
+                Ok(Outcome::Audit(results, trend)) => Screen::Audit(AuditView::new(results, trend)),
                 Ok(Outcome::View(view)) => Screen::Results(view),
                 Err(message) => Screen::Failed(message),
             };
@@ -635,9 +676,17 @@ impl App {
                     }
                 }
             },
-            // Leaving a running job abandons it; the worker finishes on its
-            // own and its cached downloads are kept.
-            Screen::Running(_) | Screen::Failed(_) => match code {
+            // Leaving a running job drops its progress channel, which the
+            // worker notices: it stops before its next network request and
+            // keeps what it already cached. Enter is not accepted here, so
+            // a double press on the home screen cannot cancel the job it
+            // just started.
+            Screen::Running(_) => match code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Esc | KeyCode::Backspace => self.screen = Screen::Home,
+                _ => {}
+            },
+            Screen::Failed(_) => match code {
                 KeyCode::Char('q') => return Action::Quit,
                 KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => self.screen = Screen::Home,
                 _ => {}
@@ -678,8 +727,23 @@ pub fn run(setup: Setup) -> std::io::Result<()> {
     // screen; `restore` is called after the loop so the terminal is put back
     // even if there was an error.
     let mut terminal = ratatui::init();
+
+    // `init` installs a panic hook that restores the terminal. That is right
+    // for this thread, but a panic on a worker thread is caught and shown on
+    // the "Something went wrong" screen: leaving raw mode there would garble
+    // a dashboard that keeps running. So workers skip the hook.
+    let ui_thread = std::thread::current().id();
+    let restore_and_report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == ui_thread {
+            restore_and_report(info);
+        }
+    }));
+
     let outcome = event_loop(&mut terminal, &mut app);
     ratatui::restore();
+    // Back to the default hook for the rest of the program.
+    drop(std::panic::take_hook());
     outcome
 }
 
@@ -724,7 +788,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
         Screen::Running(job) => {
             draw_running(frame, body, job, job.started.elapsed());
-            &[("esc", "cancel and go back"), ("q", "quit")]
+            &[("esc", "stop and go back"), ("q", "quit")]
         }
         Screen::Audit(view) => {
             draw_audit(frame, body, view, &app.setup.os_version);
@@ -884,15 +948,21 @@ fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
 }
 
 fn draw_results(frame: &mut Frame, area: Rect, view: &mut ResultView) {
-    let [header, body] =
-        Layout::vertical([Constraint::Length(view.headline.len() as u16 + 2), Constraint::Min(5)]).areas(area);
+    // Long lines (warnings above all) wrap instead of being cut off, so the
+    // header grows with them, up to half the screen.
+    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
+    let wrapped: usize =
+        view.headline.iter().map(|(_, text)| (text.chars().count() + 1).div_ceil(inner_width).max(1)).sum();
+    let header_height = (wrapped as u16 + 2).min((area.height / 2).max(3));
+    let [header, body] = Layout::vertical([Constraint::Length(header_height), Constraint::Min(5)]).areas(area);
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
 
     let headline: Vec<Line> =
         view.headline.iter().map(|(tone, text)| Line::from(Span::styled(format!(" {text}"), tone.style()))).collect();
     let title = format!(" {} ", view.module.title());
-    frame.render_widget(Paragraph::new(headline).block(Block::bordered().title(title)), header);
+    let headline = Paragraph::new(headline).block(Block::bordered().title(title)).wrap(Wrap { trim: false });
+    frame.render_widget(headline, header);
 
     let width = view.rows.iter().map(|row| row.tag.chars().count()).max().unwrap_or(0).min(12);
     let items: Vec<ListItem> = view
@@ -934,13 +1004,14 @@ fn draw_audit(frame: &mut Frame, area: Rect, view: &mut AuditView, os_version: &
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
 
-    draw_score(frame, header, &view.results, os_version);
+    draw_score(frame, header, &view.results, os_version, view.trend.as_deref());
     draw_checks(frame, list_area, view);
     draw_check_detail(frame, detail_area, view.selected());
 }
 
-fn draw_score(frame: &mut Frame, area: Rect, results: &[CheckResult], os_version: &str) {
-    let score = score::calculate_score(results);
+fn draw_score(frame: &mut Frame, area: Rect, results: &[CheckResult], os_version: &str, trend: Option<&str>) {
+    let scored = score::score_if_scorable(results);
+    let score = scored.unwrap_or(0);
     let summary = Summary::from_results(results);
     let color = match score {
         90.. => Color::Green,
@@ -948,15 +1019,19 @@ fn draw_score(frame: &mut Frame, area: Rect, results: &[CheckResult], os_version
         _ => Color::Red,
     };
 
+    let trend = trend.map(|trend| format!(" · {trend}")).unwrap_or_default();
     let title = format!(
-        " macOS Security Audit · {os_version} · {} pass, {} warn, {} fail ",
+        " macOS Security Audit · {os_version} · {} pass, {} warn, {} fail{trend} ",
         summary.pass, summary.warn, summary.fail
     );
     let gauge = Gauge::default()
         .block(Block::bordered().title(title))
         .gauge_style(Style::new().fg(color))
         .percent(score.min(100) as u16)
-        .label(format!("{score}/100 (Grade: {})", score::grade(score)));
+        .label(match scored {
+            Some(score) => format!("{score}/100 (Grade: {})", score::grade(score)),
+            None => "n/a (no check could be evaluated)".to_string(),
+        });
     frame.render_widget(gauge, area);
 }
 
@@ -1027,7 +1102,7 @@ fn draw_check_detail(frame: &mut Frame, area: Rect, selected: Option<&CheckResul
     }
     if let (true, Some(fix)) = (result.is_issue(), result.fix) {
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled("Fix command (--fix)", bold)));
+        lines.push(Line::from(Span::styled("Command to run yourself", bold)));
         lines.push(Line::from(Span::styled(fix.command_line(), Style::new().fg(Color::Cyan))));
     }
     lines.push(Line::default());
@@ -1045,7 +1120,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn app() -> App {
-        App::new(Setup { check_ids: Vec::new(), config: Config::default(), os_version: "macOS 26.6.2".into() })
+        App::new(Setup { save_history: false, check_ids: Vec::new(), config: Config::default(), os_version: "macOS 26.6.2".into() })
     }
 
     fn audit_app() -> App {
@@ -1054,7 +1129,7 @@ mod tests {
             result("firewall", Status::Pass, 20),
             result("filevault", Status::Fail, 25),
             result("ssh", Status::Warn, 10),
-        ]));
+        ], Some("previous 40 (+5), 1 changed".into())));
         app
     }
 
@@ -1165,18 +1240,69 @@ mod tests {
     fn running_screen_shows_stage_percentage_and_notes() {
         let mut app = app();
         let mut job = idle_job(Module::Vulns, true);
-        job.apply(ProgressEvent::Stage("Checking macOS and 22 apps in the NVD".into()));
+        job.apply(ProgressEvent::Stage("Checking 23 system products in the NVD".into()));
         job.apply(ProgressEvent::Step { done: 5, total: 20 });
         job.apply(ProgressEvent::Note("Google Chrome 157.0".into()));
         app.screen = Screen::Running(job);
 
         let screen = render(&mut app);
         assert!(screen.contains("Vulnerability scan · online"), "{screen}");
-        assert!(screen.contains("Checking macOS and 22 apps in the NVD"));
+        assert!(screen.contains("Checking 23 system products in the NVD"));
         assert!(screen.contains("25%"));
         assert!(screen.contains("5 of 20"));
         assert!(screen.contains("Google Chrome 157.0"));
-        assert!(screen.contains("cancel and go back"));
+        assert!(screen.contains("stop and go back"));
+    }
+
+    #[test]
+    fn enter_does_not_cancel_a_running_job_but_esc_does() {
+        let mut app = app();
+        app.screen = Screen::Running(idle_job(Module::Vulns, true));
+        app.on_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::Running(_)), "a double press on the home screen must not abandon the job");
+        app.on_key(KeyCode::Esc);
+        assert!(matches!(app.screen, Screen::Home));
+    }
+
+    #[test]
+    fn leaving_a_job_tells_its_worker_to_stop() {
+        let (progress, events) = Progress::channel();
+        let mut job = idle_job(Module::Vulns, true);
+        job.events = events;
+        let mut app = app();
+        app.screen = Screen::Running(job);
+        progress.note("still watched");
+        assert!(!progress.cancelled());
+
+        app.on_key(KeyCode::Esc);
+        progress.note("nobody is listening");
+        assert!(progress.cancelled());
+    }
+
+    #[test]
+    fn long_warnings_wrap_instead_of_being_cut_off() {
+        let warning = format!("OSV lookup failed: {} END-OF-WARNING", "curl: (6) could not resolve host ".repeat(5));
+        let mut app = app();
+        app.screen = Screen::Results(ResultView::new(
+            Module::Vulns,
+            vec![(Tone::Plain, "1 lockfiles".into()), (Tone::Warn, warning)],
+            vec![row("KEV", "pkg 1.0")],
+            "",
+        ));
+        let screen = render(&mut app);
+        assert!(screen.contains("END-OF-WARNING"), "{screen}");
+        assert!(screen.contains("pkg 1.0"), "the list still fits below the header");
+    }
+
+    #[test]
+    fn failed_npm_lookup_is_not_reported_as_switched_off() {
+        let scan = npm::scan(&[]);
+        let failed = npm_view(&scan, Some(Err("offline".into())));
+        let text: Vec<&str> = failed.headline.iter().map(|(_, text)| text.as_str()).collect();
+        assert!(text[0].ends_with("built-in list only"), "{text:?}");
+        assert!(text.iter().any(|line| line.contains("OSV lookup failed") && line.contains("offline")));
+        assert!(npm_view(&scan, None).headline[0].1.contains("online lookups are off"));
+        assert!(npm_view(&scan, Some(Ok(()))).headline[0].1.contains("OSV.dev"));
     }
 
     #[test]
@@ -1228,6 +1354,7 @@ mod tests {
     #[test]
     fn audit_screen_shows_score_list_and_detail() {
         let mut app = audit_app();
+        assert!(render(&mut app).contains("previous 40 (+5), 1 changed"));
         app.on_key(KeyCode::Down); // filevault (failing) is selected
 
         let screen = render(&mut app);
@@ -1244,7 +1371,7 @@ mod tests {
     #[test]
     fn empty_audit_does_not_panic() {
         let mut app = app();
-        app.screen = Screen::Audit(AuditView::new(Vec::new()));
+        app.screen = Screen::Audit(AuditView::new(Vec::new(), None));
         app.on_key(KeyCode::Down);
         assert!(render(&mut app).contains("No checks to show."));
     }
