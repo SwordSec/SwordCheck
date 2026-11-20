@@ -339,13 +339,11 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
                     (rest.start(), rest.start() + len, password)
                 }
                 PGPASS => {
-                    let (Some(host), Some(user), Some(password)) = (captures.get(1), captures.get(2), captures.get(3))
-                    else {
-                        continue;
-                    };
+                    // None of the three groups is optional in the pattern.
+                    let password = captures.get(3).expect("pgpass password group");
                     if password.as_str().chars().count() < MIN_URL_PASSWORD_LEN
                         || is_placeholder(password.as_str())
-                        || is_dev_default(user.as_str(), password.as_str(), host.as_str())
+                        || is_dev_default(&captures[2], password.as_str(), &captures[1])
                     {
                         continue;
                     }

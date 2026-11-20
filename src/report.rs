@@ -599,6 +599,42 @@ mod tests {
     }
 
     #[test]
+    fn text_trend_shows_the_change_in_score() {
+        colored::control::set_override(false);
+        let before = [result("firewall", Status::Fail, 20)];
+        let trend = |previous_score: u32, now: Status| {
+            let previous = RunRecord::new(
+                "2026-11-01T09:00:00+03:00".into(),
+                "macOS 26".into(),
+                previous_score,
+                &before,
+            );
+            let report = Report::new(
+                "2026-11-10T14:05:00+03:00".into(),
+                "macOS 26".into(),
+                vec![result("firewall", now, 20)],
+                Some(&previous),
+            );
+            report.render(Format::Text, false)
+        };
+        assert!(trend(0, Status::Pass).contains("  Score: 0 → 100 (+100)\n"));
+        assert!(trend(100, Status::Pass).contains("  Score: 100 → 100 (unchanged)\n"));
+        assert!(trend(100, Status::Fail).contains("  Score: 100 → 0 (-100)\n"));
+    }
+
+    #[test]
+    fn html_score_colour_follows_the_grade_bands() {
+        let report = Report::new(
+            "2026-11-10T14:05:00+03:00".into(),
+            "macOS 26".into(),
+            vec![result("firewall", Status::Pass, 80), result("sip", Status::Fail, 20)],
+            None,
+        );
+        assert_eq!(report.score, 80);
+        assert!(report.to_html().contains("<strong class=\"warn\">80</strong>"));
+    }
+
+    #[test]
     fn trend_does_not_compare_against_the_placeholder_score() {
         colored::control::set_override(false);
         let before = [result("firewall", Status::Fail, 20)];
