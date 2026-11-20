@@ -217,10 +217,8 @@ mod tests {
         assert!(run(r#"{"results": [{}]}"#).is_some(), "one result for three queries");
         assert!(run("<html>").is_some());
         // A server that keeps returning page tokens is given up on.
-        let no_progress = |_: usize, _: usize| {};
-        let endless = query_with(&queries()[..1], no_progress, |_| {
-            Ok(r#"{"results": [{"next_page_token": "x"}]}"#.to_string())
-        });
+        let pages = |_: &str| Ok(r#"{"results": [{"next_page_token": "x"}]}"#.to_string());
+        let endless = query_with(&queries()[..1], |_, _| {}, pages);
         assert_eq!(endless.1.as_deref(), Some("OSV kept returning more pages; giving up"));
         let (results, error) = query_with(&queries(), |_, _| {}, |_| Err("offline".to_string()));
         assert_eq!(error.as_deref(), Some("offline"));
@@ -263,14 +261,14 @@ mod tests {
 
         // The same within one batch: the first page is kept when the next fails.
         let mut requests = 0;
-        let no_progress = |_: usize, _: usize| {};
-        let (results, error) = query_with(&queries(), no_progress, |_| {
+        let post = |_: &str| {
             requests += 1;
             match requests {
                 1 => Ok(r#"{"results": [{"vulns": [{"id": "A-1"}], "next_page_token": "t"}, {}, {}]}"#.to_string()),
                 _ => Err("HTTP 503".to_string()),
             }
-        });
+        };
+        let (results, error) = query_with(&queries(), |_, _| {}, post);
         assert_eq!(error.as_deref(), Some("HTTP 503"));
         assert_eq!(results[0][0].id, "A-1");
     }
