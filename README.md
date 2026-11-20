@@ -12,6 +12,8 @@ in your project dependencies, macOS, common apps and Homebrew formulae, scans
 for malicious npm packages, and locates API keys scattered across `.env` and
 config files.
 
+https://github.com/user-attachments/assets/aeada071-fcdb-4b30-ab3d-1807fb02b6b2
+
 The tool is **read-only**: it never changes a setting on your Mac. For every
 problem it explains what to do, and where a single command does the job it
 shows that command for you to run yourself.
