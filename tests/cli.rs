@@ -377,3 +377,50 @@ fn audit_keeps_going_when_the_history_is_unusable() {
         stderr(&output)
     );
 }
+
+#[test]
+fn a_closed_stdout_keeps_the_exit_code() {
+    // `swordcheck --list | head -1` once head has exited: a write to stdout
+    // fails, which must not turn into a panic and exit code 101.
+    let home = Home::new("stdout");
+    for args in [&["--list"][..], &["--history"][..]] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = home
+            .command(args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {}", stderr(&output));
+        assert!(!stderr(&output).contains("panicked"), "{args:?}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn notes_and_warnings_reach_stderr() {
+    // An audit.toml in the current directory is announced.
+    let home = Home::new("notes");
+    home.write("audit.toml", "[exceptions]\nsip = \"not under test\"\n");
+    let output = home
+        .command(&["--only", "sip", "--no-history", "--json"])
+        .current_dir(&home.0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("using ./audit.toml"), "{}", stderr(&output));
+
+    // A failed OSV query for npm says so, and the scan is incomplete.
+    let app = home.project("app", false);
+    let output = home
+        .command(&["--npm", "--online", "--npm-path", str(&app)])
+        .env("https_proxy", DEAD_PROXY)
+        .env("HTTPS_PROXY", DEAD_PROXY)
+        .env("ALL_PROXY", DEAD_PROXY)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(stderr(&output).contains("OSV query failed"), "{}", stderr(&output));
+}

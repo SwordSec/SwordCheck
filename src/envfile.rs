@@ -22,7 +22,9 @@ fn lookup_in(from_env: Option<String>, files: &[PathBuf], name: &str) -> Option<
     from_env.or_else(|| {
         files.iter().find_map(|path| {
             let text = std::fs::read_to_string(path).ok()?;
-            parse(&text, name)
+            // Some editors start the file with a byte order mark; it is not
+            // part of the first name.
+            parse(text.strip_prefix('\u{feff}').unwrap_or(&text), name)
         })
     })
 }
@@ -104,6 +106,10 @@ mod tests {
         assert_eq!(lookup(Some(" \r\n")).as_deref(), Some("from-file"));
         assert_eq!(lookup(None).as_deref(), Some("from-file"));
         assert_eq!(lookup_in(None, &[], "NVD_API_KEY"), None);
+
+        // A byte order mark at the start of the file is not part of the name.
+        std::fs::write(&files[1], "\u{feff}NVD_API_KEY=with-bom\r\n").unwrap();
+        assert_eq!(lookup(None).as_deref(), Some("with-bom"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

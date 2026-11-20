@@ -44,6 +44,7 @@ use colored::Colorize;
 use config::Config;
 use report::{Format, Report};
 use runner::SystemRunner;
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -168,7 +169,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("{} {message}", "Error:".red().bold());
+            note(format_args!("{} {message}", "Error:".red().bold()));
             ExitCode::from(2)
         }
     }
@@ -204,21 +205,24 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     // A configuration picked up from the current directory can skip or
     // exempt checks, so say that it is in effect.
     if cli.config.is_none() && !cli.quiet && std::path::Path::new("audit.toml").is_file() {
-        eprintln!("{} using ./audit.toml from the current directory.", "Note:".dimmed());
+        note(format_args!(
+            "{} using ./audit.toml from the current directory.",
+            "Note:".dimmed()
+        ));
     }
     let config = Config::load(cli.config.as_deref())?;
     let mut checks = checks::registry();
     validate_ids(&cli, &config, &checks)?;
 
     if cli.list {
-        print_check_list(&checks, &config);
+        out(check_list(&checks, &config).trim_end())?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let history_path = history::history_path();
     if cli.history {
         let path = history_path.ok_or("Could not determine the history directory (HOME is not set).")?;
-        print_history(&history::load(&path)?);
+        out(history_table(&history::load(&path)?).trim_end())?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -279,7 +283,7 @@ fn load_history(cli: &Cli, history_path: Option<PathBuf>) -> (Vec<history::RunRe
         match history::load(&path) {
             Ok(records) => return (records, Some(path)),
             // A corrupt history must not block the audit; warn and continue without it.
-            Err(err) => eprintln!("{} history unavailable: {err}", "Warning:".yellow()),
+            Err(err) => note(format_args!("{} history unavailable: {err}", "Warning:".yellow())),
         }
     }
     (Vec::new(), None)
@@ -296,7 +300,7 @@ fn save_history(history_file: Option<PathBuf>, records: Vec<history::RunRecord>,
             &report.checks,
         );
         if let Err(err) = history::append(&path, records, record) {
-            eprintln!("{} could not save history: {err}", "Warning:".yellow());
+            note(format_args!("{} could not save history: {err}", "Warning:".yellow()));
         }
     }
 }
@@ -457,10 +461,10 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
             }
             Err(err) => {
                 incomplete = true;
-                eprintln!(
+                note(format_args!(
                     "{} OSV query failed: {err}. Only the built-in list was checked.",
                     "Warning:".yellow()
-                );
+                ));
             }
         }
     }
@@ -590,9 +594,28 @@ fn emit(cli: &Cli, rendered: &str) -> Result<(), String> {
                 written(path);
             }
         }
-        None => println!("{rendered}"),
+        None => out(rendered)?,
     }
     Ok(())
+}
+
+/// Prints to stdout. A reader that went away (`| head`, `| true`) only
+/// stopped wanting the output, so the exit code must still describe the
+/// run; any other failure (a full disk behind `>`) is an error.
+fn out(text: &str) -> Result<(), String> {
+    write_out(std::io::stdout(), text)
+}
+
+fn write_out(mut sink: impl std::io::Write, text: &str) -> Result<(), String> {
+    match writeln!(sink, "{text}") {
+        Err(err) if err.kind() != std::io::ErrorKind::BrokenPipe => Err(format!("Could not write the output: {err}")),
+        _ => Ok(()),
+    }
+}
+
+/// Prints a line to stderr. Like `written`, a closed stderr is not an error.
+fn note(line: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// Says where the report went. A closed stderr (`2>&1 | head`) is not an
@@ -628,12 +651,12 @@ fn exit_code(cli: &Cli, config: &Config, report: &Report) -> ExitCode {
     let below_threshold = min_score.is_some_and(|min| report.score < min);
 
     if below_threshold && !cli.quiet {
-        eprintln!(
+        note(format_args!(
             "{} score {} is below the threshold ({}).",
             "Warning:".yellow(),
             report.score,
             min_score.unwrap_or_default()
-        );
+        ));
     }
 
     if below_threshold || report.checks.iter().any(CheckResult::is_failure) {
@@ -662,9 +685,11 @@ fn validate_ids(cli: &Cli, config: &Config, checks: &[Box<dyn Check>]) -> Result
     Ok(())
 }
 
-/// `--list`: prints all checks as a table.
-fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
-    println!(
+/// `--list`: all checks as a table.
+fn check_list(checks: &[Box<dyn Check>], config: &Config) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{}",
         format!(
             "{:<16} {:>7}  {:<8} {:<8} {:<9} {}",
@@ -684,7 +709,8 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
         } else if config.exceptions.contains_key(check.id()) {
             name.push_str(" (exception)");
         }
-        println!(
+        let _ = writeln!(
+            out,
             "{:<16} {:>7}  {:<8} {:<8} {:<9} {}",
             check.id(),
             weight,
@@ -694,15 +720,17 @@ fn print_check_list(checks: &[Box<dyn Check>], config: &Config) {
             name
         );
     }
+    out
 }
 
-/// `--history`: prints past audits from oldest to newest.
-fn print_history(records: &[history::RunRecord]) {
+/// `--history`: past audits from oldest to newest.
+fn history_table(records: &[history::RunRecord]) -> String {
     if records.is_empty() {
-        println!("No audits recorded yet.");
-        return;
+        return "No audits recorded yet.".to_string();
     }
-    println!(
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{}",
         format!(
             "{:<17} {:>5}  {:<5} {:<14} {}",
@@ -712,7 +740,8 @@ fn print_history(records: &[history::RunRecord]) {
     );
     for record in records {
         let count = |status| record.checks.values().filter(|s| **s == status).count();
-        println!(
+        let _ = writeln!(
+            out,
             "{:<17} {:>5}  {:<5} {:<14} {} failed, {} warned",
             report::short_time(&record.timestamp),
             record.score,
@@ -722,6 +751,7 @@ fn print_history(records: &[history::RunRecord]) {
             count(checks::Status::Warn),
         );
     }
+    out
 }
 
 #[cfg(test)]
@@ -822,5 +852,55 @@ mod tests {
 
         let config = Config::parse("skip = [\"missing\"]").unwrap();
         assert!(validate_ids(&parse(&[]).unwrap(), &config, &checks).is_err());
+    }
+
+    #[test]
+    fn a_reader_that_went_away_is_not_an_error() {
+        // `| head` after head exited: the run goes on with its own exit code.
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        assert_eq!(write_out(writer, "report"), Ok(()));
+        // Any other failure loses the report: that is an error.
+        let read_only = std::fs::File::open("Cargo.toml").unwrap();
+        let error = write_out(read_only, "report").unwrap_err();
+        assert!(error.starts_with("Could not write the output:"), "{error}");
+        let mut written = Vec::new();
+        assert_eq!(write_out(&mut written, "report"), Ok(()));
+        assert_eq!(written, b"report\n");
+    }
+
+    #[test]
+    fn list_and_history_tables() {
+        let checks = checks::registry();
+        let config = Config::parse("skip = [\"airdrop\"]\n[exceptions]\nssh = \"on purpose\"").unwrap();
+        let list = check_list(&checks, &config);
+        assert_eq!(list.lines().count(), checks.len() + 1);
+        assert!(list.contains("AirDrop visibility (skipped)"), "{list}");
+        assert!(list.contains("Remote Login (SSH) (exception)"), "{list}");
+
+        assert_eq!(history_table(&[]), "No audits recorded yet.");
+        let results = [
+            score::tests::result("firewall", checks::Status::Fail, 20),
+            score::tests::result("sip", checks::Status::Warn, 20),
+        ];
+        let record = history::RunRecord::new("2026-11-20T14:05:00+03:00".into(), "macOS 26".into(), 25, &results);
+        let table = history_table(&[record]);
+        assert!(table.starts_with("DATE"), "{table}");
+        assert!(table.contains("2026-11-20 14:05"), "{table}");
+        assert!(table.contains("1 failed, 1 warned"), "{table}");
+    }
+
+    #[test]
+    fn a_score_below_the_threshold_fails() {
+        let report = Report::new(
+            "2026-11-20T14:05:00+03:00".into(),
+            "macOS 26".into(),
+            vec![score::tests::result("sip", checks::Status::Warn, 20)],
+            None,
+        );
+        let below = parse(&["--min-score", "80"]).unwrap();
+        assert_eq!(exit_code(&below, &Config::default(), &report), ExitCode::FAILURE);
+        let above = parse(&["--min-score", "40"]).unwrap();
+        assert_eq!(exit_code(&above, &Config::default(), &report), ExitCode::SUCCESS);
     }
 }
