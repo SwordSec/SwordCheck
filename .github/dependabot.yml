@@ -1,11 +1,15 @@
+# Security updates only: a limit of 0 turns off routine version-bump pull
+# requests, while pull requests that fix a known vulnerability are still
+# opened (they are enabled in the repository's security settings).
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
