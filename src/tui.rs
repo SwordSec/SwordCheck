@@ -974,7 +974,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, os_version: &str) {
     let [header, body, toggle] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(6), Constraint::Length(3)]).areas(area);
+        Layout::vertical([Constraint::Length(3), Constraint::Min(6), Constraint::Length(4)]).areas(area);
     let [menu_area, about_area] =
         Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).areas(body);
     let bold = Style::new().add_modifier(Modifier::BOLD);
@@ -1025,8 +1025,9 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
     } else {
         Span::styled("OFF", Tone::Warn.style().add_modifier(Modifier::BOLD))
     };
+    // Exactly what leaves the machine (README: Vulnerability scan, API keys).
     let explanation = if online {
-        "  package names and versions are sent to OSV.dev, NVD, CISA and FIRST; nothing else"
+        "  names and versions to OSV.dev and the NVD (with your NVD API key, if set), CVE ids to FIRST; nothing else"
     } else {
         "  nothing leaves this machine"
     };
@@ -1035,7 +1036,11 @@ fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, 
         state,
         Span::styled(explanation, dim),
     ]);
-    frame.render_widget(Paragraph::new(line).block(Block::bordered()), toggle);
+    // Wraps rather than cutting the statement off on a narrow terminal.
+    frame.render_widget(
+        Paragraph::new(line).block(Block::bordered()).wrap(Wrap { trim: false }),
+        toggle,
+    );
 }
 
 /// `m:ss`.
@@ -1460,6 +1465,34 @@ mod tests {
 
         assert_eq!(app.on_key(KeyCode::Char('o')), Action::Continue);
         assert!(render(&mut app).contains("Online lookups: ON"));
+    }
+
+    #[test]
+    fn online_toggle_says_exactly_what_leaves_the_machine() {
+        let screen = |width: u16| {
+            let mut app = app();
+            app.online = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, 28)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(usize::from(width))
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let wide = screen(220);
+        assert!(
+            wide.contains("names and versions to OSV.dev and the NVD (with your NVD API key, if set), CVE ids to FIRST; nothing else"),
+            "{wide}"
+        );
+        // On an 80-column terminal the statement wraps instead of being cut off.
+        let narrow = screen(80);
+        assert!(
+            narrow.contains("API key, if set") && narrow.contains("nothing else"),
+            "{narrow}"
+        );
     }
 
     #[test]
