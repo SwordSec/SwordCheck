@@ -139,9 +139,9 @@ it never touches the network.
 
 - **Where it looks:** in projects under your home directory: `.env*`, `*.env`,
   `*.tfstate`, `*.tfvars`, `*.pem`, `*.key`, `credentials.json`, `secrets.*`,
-  `.mcp.json`, `.git/config`. In addition: `~/.aws/credentials`, `~/.npmrc`,
-  `~/.netrc`, `~/.docker/config.json`, `~/.kube/config`, shell history and rc
-  files, `~/.ssh`, and Claude / Cursor / VS Code settings.
+  `.mcp.json`, `.git/config`, `.yarnrc.yml`. In addition: `~/.aws/credentials`,
+  `~/.npmrc`, `~/.netrc`, `~/.docker/config.json`, `~/.kube/config`, shell
+  history and rc files, `~/.ssh`, and Claude / Cursor / VS Code settings.
 - **What it skips:** dependency and build directories such as `node_modules`,
   `target`, `vendor` and `testdata`, hidden directories, `~/Library`,
   `~/go/pkg`.

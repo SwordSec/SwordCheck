@@ -165,6 +165,10 @@ pub struct System {
     pub items: Vec<SystemItem>,
     /// Homebrew formulae that are installed but not in `FORMULAE`.
     pub unmatched_formulae: usize,
+    /// Products that are in the lookup tables but have no version that can
+    /// be looked up (a Homebrew build from git, an app whose version string
+    /// is missing or unusual), as "name (what was found)".
+    pub unversioned: Vec<String>,
 }
 
 /// Vulnerability counts for one lockfile.
@@ -197,6 +201,9 @@ pub struct Scan {
     pub system: Vec<SystemItem>,
     /// Installed Homebrew formulae that could not be looked up.
     pub unmatched_formulae: usize,
+    /// Known products that were not checked because they have no usable version.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unversioned: Vec<String>,
     pub findings: Vec<Finding>,
     pub projects: Vec<ProjectSummary>,
     /// Lookups that failed; the rest of the scan is still reported.
@@ -256,12 +263,20 @@ impl Scan {
 
     /// Says how many Homebrew formulae were left out, if any.
     pub fn unmatched_note(&self) -> Option<String> {
-        (self.unmatched_formulae > 0).then(|| {
-            format!(
+        let mut notes = Vec::new();
+        if self.unmatched_formulae > 0 {
+            notes.push(format!(
                 "{} other Homebrew formulae are not in the lookup table and were not checked",
                 self.unmatched_formulae
-            )
-        })
+            ));
+        }
+        if !self.unversioned.is_empty() {
+            notes.push(format!(
+                "not checked, no version that can be looked up: {}",
+                self.unversioned.join(", ")
+            ));
+        }
+        (!notes.is_empty()).then(|| notes.join("; "))
     }
 
     fn count(&self, severity: Severity) -> usize {
@@ -436,21 +451,30 @@ const FORMULAE: &[(&str, &str)] = &[
 /// Builds the list of products to look up: macOS, recognized apps and
 /// recognized Homebrew formulae.
 pub fn system_items(runner: &dyn CommandRunner) -> System {
-    let mut system = System {
-        items: app_items(runner),
-        unmatched_formulae: 0,
-    };
+    let mut system = app_items(runner);
     for cellar in homebrew_cellars() {
-        let (items, unmatched) = homebrew_items(&cellar);
-        system.items.extend(items);
-        system.unmatched_formulae += unmatched;
+        let brew = homebrew_items(&cellar);
+        system.items.extend(brew.items);
+        system.unmatched_formulae += brew.unmatched_formulae;
+        system.unversioned.extend(brew.unversioned);
     }
     system
 }
 
-/// macOS plus the applications in `APPS`.
-fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
+/// macOS plus the applications in `APPS`, from `/Applications` and
+/// `~/Applications`.
+fn app_items(runner: &dyn CommandRunner) -> System {
+    let mut dirs = vec![PathBuf::from("/Applications")];
+    dirs.extend(std::env::var_os("HOME").map(|home| Path::new(&home).join("Applications")));
+    app_items_in(runner, &dirs)
+}
+
+/// macOS plus the applications in `APPS` found in `dirs`. A known product
+/// whose version cannot be looked up is listed in `unversioned`, so that it
+/// does not silently drop out of the report.
+fn app_items_in(runner: &dyn CommandRunner, dirs: &[PathBuf]) -> System {
     let mut items = Vec::new();
+    let mut unversioned = Vec::new();
     let read = |program: &str, args: &[&str]| {
         runner
             .run(program, args)
@@ -459,21 +483,19 @@ fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
             .map(|out| out.stdout.trim().to_string())
     };
 
-    if let Some(version) = read("sw_vers", &["-productVersion"]).as_deref().and_then(clean_version) {
-        items.push(system_item(
+    let macos = read("sw_vers", &["-productVersion"]);
+    match macos.as_deref().and_then(clean_version) {
+        Some(version) => items.push(system_item(
             Source::Os,
             "macOS",
             &version,
             format!("cpe:2.3:o:apple:macos:{version}:*:*:*:*:*:*:*"),
-        ));
+        )),
+        None => unversioned.push(found("macOS", macos.as_deref())),
     }
 
-    let mut dirs = vec![PathBuf::from("/Applications")];
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(Path::new(&home).join("Applications"));
-    }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         let mut apps: Vec<PathBuf> = entries
@@ -495,13 +517,15 @@ fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
             }) else {
                 continue;
             };
-            let Some(version) = extract("CFBundleShortVersionString").as_deref().and_then(clean_version) else {
-                continue;
-            };
             let name = app
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let raw = extract("CFBundleShortVersionString");
+            let Some(version) = raw.as_deref().and_then(clean_version) else {
+                unversioned.push(found(&name, raw.as_deref()));
+                continue;
+            };
             items.push(system_item(
                 Source::App,
                 &name,
@@ -510,7 +534,19 @@ fn app_items(runner: &dyn CommandRunner) -> Vec<SystemItem> {
             ));
         }
     }
-    items
+    System {
+        items,
+        unversioned,
+        ..System::default()
+    }
+}
+
+/// "name (what was found)" for a known product whose version is unusable.
+fn found(name: &str, version: Option<&str>) -> String {
+    match version.map(str::trim).filter(|version| !version.is_empty()) {
+        Some(version) => format!("{name} (version \"{version}\")"),
+        None => format!("{name} (no version)"),
+    }
 }
 
 /// The Cellar of every Homebrew installation: a custom prefix, Apple
@@ -533,8 +569,9 @@ fn homebrew_cellars() -> Vec<PathBuf> {
 }
 
 /// Reads a Cellar (`Cellar/<formula>/<version>/`) without running `brew`.
-/// Returns the formulae that can be looked up and the number that cannot.
-fn homebrew_items(cellar: &Path) -> (Vec<SystemItem>, usize) {
+/// Returns the formulae that can be looked up, the number that are not in
+/// the table, and the known ones without a version that can be looked up.
+fn homebrew_items(cellar: &Path) -> System {
     let subdirs = |dir: &Path| {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .into_iter()
@@ -548,29 +585,40 @@ fn homebrew_items(cellar: &Path) -> (Vec<SystemItem>, usize) {
         names
     };
 
-    let mut items = Vec::new();
-    let mut unmatched = 0;
+    let mut system = System::default();
     for formula in subdirs(cellar) {
         let versions = subdirs(&cellar.join(&formula));
         let found: Vec<SystemItem> = versions
             .iter()
             .filter_map(|version| formula_item(&formula, version))
             .collect();
-        if found.is_empty() && !versions.is_empty() {
-            unmatched += 1;
+        match (found.is_empty(), versions.is_empty(), formula_product(&formula)) {
+            // A known formula installed only from git (`HEAD-<sha>`): it is
+            // in the table, but there is no version to look up.
+            (true, false, Some(_)) => system
+                .unversioned
+                .push(format!("{formula} {} (Homebrew)", versions.join(", "))),
+            (true, false, None) => system.unmatched_formulae += 1,
+            _ => {}
         }
-        items.extend(found);
+        system.items.extend(found);
     }
-    (items, unmatched)
+    system
+}
+
+/// The NVD `vendor:product` of a formula, if it is in `FORMULAE`.
+/// Versioned formulae (`openssl@3`) use the entry of the unversioned name.
+fn formula_product(formula: &str) -> Option<&'static str> {
+    let base = formula.split('@').next().unwrap_or(formula);
+    FORMULAE
+        .iter()
+        .find(|(name, _)| *name == base)
+        .map(|(_, product)| *product)
 }
 
 /// The lookup for one installed formula version, if the formula is known.
 fn formula_item(formula: &str, version: &str) -> Option<SystemItem> {
-    let base = formula.split('@').next()?;
-    let product = FORMULAE
-        .iter()
-        .find(|(name, _)| *name == base)
-        .map(|(_, product)| *product)?;
+    let product = formula_product(formula)?;
     let version = clean_version(strip_revision(version))?;
     Some(system_item(
         Source::Homebrew,
@@ -621,6 +669,7 @@ pub fn offline(lockfiles: &[Lockfile], system: System) -> Scan {
         by_ecosystem: count_ecosystems(&unique),
         system: system.items,
         unmatched_formulae: system.unmatched_formulae,
+        unversioned: system.unversioned,
         ..Scan::default()
     }
 }
@@ -660,6 +709,7 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
     let System {
         items: mut system,
         unmatched_formulae,
+        unversioned,
     } = system;
     let mut warnings = Vec::new();
     let unique = unique_packages(lockfiles);
@@ -762,6 +812,7 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
         projects: summarize_projects(lockfiles, &findings, &hits, &packages),
         system,
         unmatched_formulae,
+        unversioned,
         findings,
         warnings,
         // Filled in by the caller, which read the lockfiles.
@@ -2077,8 +2128,13 @@ mod tests {
         }
         std::fs::write(cellar.join("stray-file"), "").unwrap();
 
-        let (items, unmatched) = homebrew_items(&cellar);
+        let System {
+            items,
+            unmatched_formulae: unmatched,
+            unversioned,
+        } = homebrew_items(&cellar);
         std::fs::remove_dir_all(&cellar).unwrap();
+        assert!(unversioned.is_empty());
 
         let titles: Vec<String> = items.iter().map(SystemItem::title).collect();
         assert_eq!(
@@ -2093,10 +2149,92 @@ mod tests {
             unmatched, 1,
             "only the installed formula that is not in the table counts"
         );
-        assert_eq!(
-            homebrew_items(&cellar),
-            (Vec::new(), 0),
+        let missing = homebrew_items(&cellar);
+        assert!(
+            missing.items.is_empty() && missing.unmatched_formulae == 0 && missing.unversioned.is_empty(),
             "a missing Cellar is not an error"
+        );
+    }
+
+    #[test]
+    fn known_formula_without_a_version_is_named_not_misfiled() {
+        // `brew install --HEAD curl`: curl is in the table, but a build from
+        // git has no version the NVD knows.
+        let cellar = std::env::temp_dir().join(format!("swordcheck-cellar-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cellar);
+        for dir in [
+            "curl/HEAD-1a2b3c4",
+            "openssl@3/HEAD-9f8e7d6",
+            "openssl@3/3.4.0",
+            "some-private-tool/HEAD-0000000",
+        ] {
+            std::fs::create_dir_all(cellar.join(dir)).unwrap();
+        }
+        let system = homebrew_items(&cellar);
+        std::fs::remove_dir_all(&cellar).unwrap();
+
+        let titles: Vec<String> = system.items.iter().map(SystemItem::title).collect();
+        assert_eq!(
+            titles,
+            ["openssl@3 3.4.0 (Homebrew)"],
+            "a released version is still checked"
+        );
+        assert_eq!(system.unversioned, ["curl HEAD-1a2b3c4 (Homebrew)"]);
+        assert_eq!(system.unmatched_formulae, 1, "only the formula outside the table");
+
+        let scan = offline(&[], system);
+        let note = scan.unmatched_note().unwrap();
+        assert_eq!(
+            note,
+            "1 other Homebrew formulae are not in the lookup table and were not checked; \
+             not checked, no version that can be looked up: curl HEAD-1a2b3c4 (Homebrew)"
+        );
+        let json = serde_json::to_string(&scan).unwrap();
+        assert!(
+            json.contains(r#""unversioned":["curl HEAD-1a2b3c4 (Homebrew)"]"#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn known_app_without_a_usable_version_is_named() {
+        use crate::runner::MockRunner;
+        let home = std::env::temp_dir().join(format!("swordcheck-apps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for app in ["Google Chrome", "Firefox", "Signal", "Zoom"] {
+            std::fs::create_dir_all(home.join(format!("Applications/{app}.app/Contents"))).unwrap();
+        }
+        let plist = |app: &str| {
+            home.join(format!("Applications/{app}.app/Contents/Info.plist"))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let id = |app: &str| format!("plutil -extract CFBundleIdentifier raw -o - {}", plist(app));
+        let version = |app: &str| format!("plutil -extract CFBundleShortVersionString raw -o - {}", plist(app));
+        let runner = MockRunner::new()
+            .fail("sw_vers -productVersion", "not available")
+            .ok(&id("Google Chrome"), "com.google.Chrome")
+            .fail(&version("Google Chrome"), "Could not extract value")
+            .ok(&id("Firefox"), "org.mozilla.firefox")
+            .ok(&version("Firefox"), "v133")
+            .ok(&id("Signal"), "org.whispersystems.signal-desktop")
+            .ok(&version("Signal"), "  ")
+            .ok(&id("Zoom"), "us.zoom.xos")
+            .ok(&version("Zoom"), "6.2.11 (44190)");
+
+        let system = app_items_in(&runner, &[home.join("Applications")]);
+        std::fs::remove_dir_all(&home).unwrap();
+
+        let titles: Vec<String> = system.items.iter().map(SystemItem::title).collect();
+        assert_eq!(titles, ["Zoom 6.2.11"], "an app with a usable version is still checked");
+        assert_eq!(
+            system.unversioned,
+            [
+                "macOS (no version)",
+                "Firefox (version \"v133\")",
+                "Google Chrome (no version)",
+                "Signal (no version)",
+            ]
         );
     }
 
@@ -2297,6 +2435,7 @@ mod tests {
             System {
                 items: vec![system_item(Source::Os, "macOS", "15.0", "cpe".to_string())],
                 unmatched_formulae: 4,
+                unversioned: Vec::new(),
             },
         );
         assert!(!scan.online);

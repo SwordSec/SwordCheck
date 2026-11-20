@@ -63,6 +63,7 @@ const KUBE_CLIENT_KEY: &str = "kube-client-key";
 const NETRC: &str = "netrc";
 const PGPASS: &str = "pgpass";
 const NPM_AUTH: &str = "npm-auth";
+const YARN_AUTH_IDENT: &str = "yarn-auth-ident";
 
 /// Order matters: a piece of text is claimed by the first rule that matches it.
 const RULES: &[Rule] = &[
@@ -134,6 +135,15 @@ const RULES: &[Rule] = &[
         provider: "npm registry login",
         pattern: r#"(?m)^[ \t]*(?://\S*?:)?_auth[ \t]*=[ \t]*["']?([A-Za-z0-9+/]{8,}={0,2})"#,
         file_hint: Some("npmrc"),
+    },
+    // Yarn 2+'s `npmAuthIdent` in `.yarnrc.yml` (top level, or under
+    // `npmScopes` / `npmRegistries`): `user:password`, or base64 of it, so the
+    // whole value is the login. `npmAuthToken` is found by the generic rule.
+    Rule {
+        id: YARN_AUTH_IDENT,
+        provider: "Yarn registry login",
+        pattern: r#"(?m)^[ \t]*npmAuthIdent[ \t]*:[ \t]*["']?([^\s"']{4,})"#,
+        file_hint: Some("yarnrc"),
     },
     // `hostname:port:database:username:password`, one per line; `\:` and `\\`
     // are escapes, `#` starts a comment. Group 1 is the host, group 2 the user
@@ -820,7 +830,7 @@ fn mask(rule: &str, secret: &str) -> String {
     if len < MIN_REVEAL_LEN
         || matches!(
             rule,
-            GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC | PGPASS | NPM_AUTH
+            GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC | PGPASS | NPM_AUTH | YARN_AUTH_IDENT
         )
     {
         return hidden;
@@ -1259,8 +1269,9 @@ fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
 
 /// Is the file name a candidate for holding secrets?
 fn is_candidate(name: &str) -> bool {
-    const EXACT: [&str; 12] = [
+    const EXACT: [&str; 13] = [
         ".npmrc",
+        ".yarnrc.yml",
         ".netrc",
         ".pypirc",
         ".mcp.json",
@@ -2286,6 +2297,37 @@ mod tests {
         assert!(found.iter().all(|found| found.rule == NPM_AUTH));
         assert_eq!(mask(NPM_AUTH, &plain), format!("•••• ({} chars)", plain.len()));
         assert!(rules_hit(".env", &text).is_empty(), "only in .npmrc files");
+    }
+
+    #[test]
+    fn a_projects_yarnrc_is_scanned() {
+        let dir = TempDir::new("yarnrc");
+        let yarnrc = dir.write("app/.yarnrc.yml", "npmAuthToken: x\n");
+        let nested = dir.write("app/packages/web/.yarnrc.yml", "npmAuthToken: x\n");
+        dir.write("app/node_modules/dep/.yarnrc.yml", "npmAuthToken: x\n");
+        let mut expected = vec![yarnrc, nested];
+        expected.sort();
+        assert_eq!(files_under(&dir.0.join("app")), expected);
+    }
+
+    #[test]
+    fn yarn_auth_ident_is_a_login() {
+        let (top, base64, quoted) = (
+            format!("deploy:{}", random(ALNUM, 18, 80)),
+            format!("{}==", random(&format!("{ALNUM}+/"), 30, 81)),
+            format!("ci:{}", random(ALNUM, 18, 82)),
+        );
+        let text = format!(
+            "npmAuthIdent: \"{top}\"\nnpmScopes:\n  corp:\n    npmAuthIdent: {base64}\n\
+             npmRegistries:\n  \"https://npm.corp.example\":\n    npmAuthIdent: '{quoted}'\n\
+             # npmAuthIdent: old:{top}x\nnpmAuthIdent: \"${{NPM_AUTH_IDENT}}\"\n"
+        );
+        let found = scan_text(".yarnrc.yml", &text);
+        let secrets: Vec<&str> = found.iter().map(|found| found.secret.as_str()).collect();
+        assert_eq!(secrets, [top.as_str(), base64.as_str(), quoted.as_str()]);
+        assert!(found.iter().all(|found| found.rule == YARN_AUTH_IDENT));
+        assert_eq!(mask(YARN_AUTH_IDENT, &base64), format!("•••• ({} chars)", base64.len()));
+        assert!(rules_hit("config.yml", &text).is_empty(), "only in yarnrc files");
     }
 
     #[test]
