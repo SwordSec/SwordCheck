@@ -64,6 +64,7 @@ Every module is also available as a flag, for scripts and CI:
 cargo run -- --format text        # colored text report of the audit
 cargo run -- --json               # JSON output (scripts / CI)
 cargo run -- --format html -o report.html
+cargo run -- --report report.html # one HTML page with every module (see below)
 cargo run -- --only filevault,sip # run selected checks only
 cargo run -- --min-score 80 -q    # CI: exit code 1 if the score is below 80
 cargo run -- --npm                # malicious npm package scan (global + projects)
@@ -75,7 +76,8 @@ cargo run -- --vulns --online     # look them up in OSV.dev, NVD, CISA KEV and E
 cargo run -- --help
 ```
 
-Tests: `cargo test`
+Tests: `cargo test` (the end-to-end tests in `tests/cli.rs` run the binary
+against a temporary home directory)
 
 ## Checks
 
@@ -121,7 +123,7 @@ means the advice points to the place in System Settings (or Recovery).
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
 | 2 | Usage or configuration error |
-| 3 | `--npm` / `--vulns` with `--online`: a lookup failed, so the scan is incomplete |
+| 3 | `--npm` / `--vulns` / `--report` with `--online`: a lookup failed, so the scan is incomplete |
 
 The scan modes use 1 for their own "found something" condition (described in
 each section) and 3 when an online lookup failed and nothing was found in the
@@ -275,6 +277,34 @@ JavaScript inside packages is not analyzed.
 the report to a file. The JSON output contains the score, the summary, the
 details of every check, the previous run and the checks that changed.
 
+## Full report (`--report`)
+
+`--report FILE` runs the audit and every scan and writes one HTML page: a
+"Fix these first" list ordered by risk across all modules (malware, then what
+is exploited in the wild, then secrets in git-tracked files, then failing
+settings by weight), the score with its grade bands and the change since the
+previous audit, and one section per module with a row for every finding.
+Rows open for details, commands to run have a copy button, and passing checks
+are folded away.
+
+The page is a single file: the styles and the small script are inline, the
+fonts are the system's, and it loads nothing from the network, so it can be
+attached to a ticket or opened offline. It follows the light or dark setting
+and prints with every row expanded. Secret values stay masked.
+
+```sh
+cargo run -- --report report.html            # audit + every scan, offline
+cargo run -- --report report.html --online   # also look versions up (OSV.dev, NVD, CISA, FIRST)
+cargo run -- --report report.html --vulns-path ~/app --npm-path ~/app --secrets-path ~/app
+```
+
+The audit options (`--only`, `--skip`, `--config`, `--min-score`,
+`--no-history`) apply to its audit part, and a full audit is saved to the
+history as usual. The path options narrow the scans to one project; with
+`--vulns-path`, macOS, apps and Homebrew are not scanned. The exit code is 1
+when the audit fails or a scan finds malware, a known-exploited vulnerability
+or a secret in a git-tracked file, and 3 when an online lookup failed.
+
 ## History and comparison
 
 Every full audit, from the command line or the dashboard, is saved to
@@ -364,6 +394,7 @@ On the command line, `--vulns --online` prints the same phases to stderr.
 | `src/score.rs` | Score, grade, summary |
 | `src/history.rs` | History records and diffing |
 | `src/report.rs` | Text / JSON / Markdown / HTML |
+| `src/full_report.rs` | The single-page HTML report of every module (`--report`) |
 | `src/tui.rs` | `ratatui` dashboard: home, progress and result screens |
 | `src/progress.rs` | Progress events shared by the dashboard and the command line |
 

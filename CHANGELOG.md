@@ -27,5 +27,7 @@ First public version.
 - Strictly read-only: recommendations and, where one command is a complete
   remedy, the command to run yourself.
 - Optional `NVD_API_KEY` from the environment or a `.env` file.
+- **Full report (`--report FILE`):** the audit and every scan on one
+  self-contained HTML page, with a "Fix these first" list across modules.
 - **Install script:** `install.sh` installs a release binary without a Rust
   toolchain, after checking the archive's SHA-256.

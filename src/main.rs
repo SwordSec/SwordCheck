@@ -11,6 +11,7 @@
 //! - `score`   : score and grade calculation
 //! - `history` : comparison with previous runs
 //! - `report`  : text / JSON / Markdown / HTML output
+//! - `full_report`: one HTML page with every module (`--report`)
 //! - `npm`     : malicious npm package scan (`--npm`)
 //! - `vulns`   : vulnerability scan of dependencies, macOS and apps (`--vulns`)
 //! - `lockfiles`: lockfile parsers used by the vulnerability scan
@@ -23,6 +24,7 @@
 mod checks;
 mod config;
 mod envfile;
+mod full_report;
 mod history;
 mod lockfiles;
 mod net;
@@ -37,13 +39,13 @@ mod tui;
 mod vulns;
 
 use checks::{Check, CheckResult};
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, ArgGroup, Parser};
 use colored::Colorize;
 use config::Config;
 use report::{Format, Report};
 use runner::SystemRunner;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Command-line arguments. `clap` generates the parser and the `--help`
@@ -57,7 +59,12 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns / --report with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+,
+    // The path options of a scan also narrow that scan inside `--report`.
+    group(ArgGroup::new("npm_scope").args(["npm", "report"])),
+    group(ArgGroup::new("vulns_scope").args(["vulns", "report"])),
+    group(ArgGroup::new("secrets_scope").args(["secrets", "report"]))
 )]
 struct Cli {
     /// Output format
@@ -116,11 +123,11 @@ struct Cli {
     #[arg(long, group = "network_mode", conflicts_with_all = ["tui", "list", "history", "only", "skip", "min_score", "no_history", "config"])]
     npm: bool,
 
-    /// With --npm: scan only this directory (repeatable)
-    #[arg(long, value_name = "DIR", requires = "npm")]
+    /// With --npm or --report: scan only this directory (repeatable)
+    #[arg(long, value_name = "DIR", requires = "npm_scope")]
     npm_path: Vec<PathBuf>,
 
-    /// With --npm or --vulns: query online databases (sends package names and versions only)
+    /// With --npm, --vulns or --report: query online databases (sends package names and versions only)
     #[arg(long, requires = "network_mode")]
     online: bool,
 
@@ -128,17 +135,21 @@ struct Cli {
     #[arg(long, group = "network_mode", conflicts_with_all = ["tui", "list", "history", "secrets", "only", "skip", "min_score", "no_history", "config"])]
     vulns: bool,
 
-    /// With --vulns: scan only the lockfiles under this path (repeatable; skips macOS, apps and Homebrew)
-    #[arg(long, value_name = "PATH", requires = "vulns")]
+    /// With --vulns or --report: scan only the lockfiles under this path (repeatable; skips macOS, apps and Homebrew)
+    #[arg(long, value_name = "PATH", requires = "vulns_scope")]
     vulns_path: Vec<PathBuf>,
 
     /// Search .env and configuration files for API keys / secrets
     #[arg(long, conflicts_with_all = ["tui", "list", "history", "npm", "only", "skip", "min_score", "no_history", "config"])]
     secrets: bool,
 
-    /// With --secrets: scan only this directory or file (repeatable)
-    #[arg(long, value_name = "PATH", requires = "secrets")]
+    /// With --secrets or --report: scan only this directory or file (repeatable)
+    #[arg(long, value_name = "PATH", requires = "secrets_scope")]
     secrets_path: Vec<PathBuf>,
+
+    /// Run the audit and every scan, and write one HTML report to this file
+    #[arg(long, value_name = "FILE", group = "network_mode", conflicts_with_all = ["tui", "list", "history", "npm", "vulns", "secrets", "format", "json", "output", "quiet"])]
+    report: Option<PathBuf>,
 
     /// Show help
     #[arg(short = 'h', long, action = ArgAction::Help)]
@@ -220,6 +231,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     let runner = SystemRunner::new();
     let os_version = checks::os_version(&runner);
 
+    if let Some(path) = &cli.report {
+        return run_report(&cli, path, &checks, &config, &runner, os_version, history_path);
+    }
+
     // Without any argument, an interactive terminal gets the dashboard;
     // scripts and pipes keep getting the plain report.
     let bare = std::env::args_os().len() == 1 && std::io::stdout().is_terminal();
@@ -239,37 +254,177 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     }
 
     let results = checks::run_checks(&checks, &runner, &config);
+    let (records, history_file) = load_history(&cli, history_path);
 
-    // Partial runs (--only/--skip) are not written to the history: their
-    // scores cannot be compared with a full audit.
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let format = if cli.json { Format::Json } else { cli.format };
+    let report = Report::new(timestamp, os_version, results, records.last());
+    emit(&cli, &report.render(format, cli.quiet))?;
+    save_history(history_file, records, &report);
+
+    Ok(exit_code(&cli, &config, &report))
+}
+
+/// Loads the history to compare a full audit with. Partial runs
+/// (--only/--skip) and `--no-history` get none: their scores cannot be
+/// compared with a full audit. Also returns the file to save the run to.
+fn load_history(cli: &Cli, history_path: Option<PathBuf>) -> (Vec<history::RunRecord>, Option<PathBuf>) {
     let use_history = !cli.no_history && cli.only.is_empty() && cli.skip.is_empty();
-    let mut records = Vec::new();
-    let mut history_file = None;
     if use_history && let Some(path) = history_path {
         match history::load(&path) {
-            Ok(loaded) => {
-                records = loaded;
-                history_file = Some(path);
-            }
+            Ok(records) => return (records, Some(path)),
             // A corrupt history must not block the audit; warn and continue without it.
             Err(err) => eprintln!("{} history unavailable: {err}", "Warning:".yellow()),
         }
     }
+    (Vec::new(), None)
+}
 
-    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    let format = if cli.json { Format::Json } else { cli.format };
-    let report = Report::new(timestamp.clone(), os_version.clone(), results, records.last());
-    emit(&cli, &report.render(format, cli.quiet))?;
-
+/// Adds the audit to the history file returned by `load_history`.
+fn save_history(history_file: Option<PathBuf>, records: Vec<history::RunRecord>, report: &Report) {
     // A run in which nothing could be evaluated has no score worth comparing.
     if let Some(path) = history_file.filter(|_| report.scorable) {
-        let record = history::RunRecord::new(timestamp, os_version, report.score, &report.checks);
+        let record = history::RunRecord::new(
+            report.timestamp.clone(),
+            report.os_version.clone(),
+            report.score,
+            &report.checks,
+        );
         if let Err(err) = history::append(&path, records, record) {
             eprintln!("{} could not save history: {err}", "Warning:".yellow());
         }
     }
+}
 
-    Ok(exit_code(&cli, &config, &report))
+/// `--report FILE`: runs the audit and every scan, and writes one HTML page.
+/// The exit code is 1 when the audit fails (as without `--report`) or a scan
+/// finds malware, a known-exploited vulnerability or a secret in a file
+/// tracked in git; otherwise `EXIT_INCOMPLETE` when an online lookup failed.
+fn run_report(
+    cli: &Cli,
+    path: &Path,
+    checks: &[Box<dyn Check>],
+    config: &Config,
+    runner: &SystemRunner,
+    os_version: String,
+    history_path: Option<PathBuf>,
+) -> Result<ExitCode, String> {
+    // Check the paths before the slow part starts.
+    let lockfile_paths = match cli.vulns_path.as_slice() {
+        [] => lockfiles::default_files(),
+        paths => vulns_paths(paths)?,
+    };
+    let npm_roots = match cli.npm_path.as_slice() {
+        [] => npm::all_roots(runner),
+        paths => npm_roots(paths)?,
+    };
+    let secret_files = match cli.secrets_path.as_slice() {
+        [] => secrets::default_files(),
+        paths => secret_files(paths)?,
+    };
+    // Every module reports what it is doing, one line each, on stderr.
+    let progress = progress::Progress::stderr();
+
+    progress.stage("Auditing macOS settings");
+    let results = checks::run_checks(checks, runner, config);
+    let (records, history_file) = load_history(cli, history_path);
+    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let audit = Report::new(timestamp, os_version, results, records.last());
+
+    // An explicit path narrows the vulnerability scan to those projects.
+    let system = if cli.vulns_path.is_empty() {
+        vulns::system_items(runner)
+    } else {
+        vulns::System::default()
+    };
+    let lockfiles = vulns::read_lockfiles(&lockfile_paths, &progress);
+    let vulns = if cli.online {
+        let options = vulns::Online {
+            cache: cache_dir()?,
+            progress: progress.clone(),
+        };
+        vulns::scan(&lockfiles, system, &options)
+    } else {
+        vulns::offline(&lockfiles, system)
+    };
+
+    let mut npm = npm::scan_with(&npm_roots, &progress);
+    let npm_lookup = cli
+        .online
+        .then(|| npm::osv_lookup_with(&npm.installed, &progress).map(|hits| npm.add_osv(hits)));
+
+    let secrets = secrets::scan_with(&secret_files, &progress);
+
+    let report = full_report::FullReport {
+        audit,
+        online: cli.online,
+        vulns,
+        npm,
+        npm_lookup,
+        secrets,
+        home: std::env::var_os("HOME").map(PathBuf::from),
+    };
+    std::fs::write(path, report.to_html()).map_err(|err| format!("Could not write {}: {err}", path.display()))?;
+    eprintln!("Report written: {}", path.display());
+
+    let audit_failed = exit_code(cli, config, &report.audit) == ExitCode::FAILURE;
+    let threat = report.found_threat();
+    let incomplete = report.incomplete();
+    save_history(history_file, records, &report.audit);
+    Ok(match (audit_failed || threat, incomplete) {
+        (true, _) => ExitCode::FAILURE,
+        (false, true) => ExitCode::from(EXIT_INCOMPLETE),
+        (false, false) => ExitCode::SUCCESS,
+    })
+}
+
+/// The `--npm-path` directories as scan roots.
+fn npm_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for path in paths {
+        if !path.is_dir() {
+            return Err(format!("{} is not a directory.", path.display()));
+        }
+        roots.extend(npm::roots_under(path));
+    }
+    Ok(roots)
+}
+
+/// The files under the `--secrets-path` paths.
+fn secret_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            return Err(format!("{} not found.", path.display()));
+        }
+        files.extend(secrets::files_under(path));
+    }
+    Ok(files)
+}
+
+/// The lockfiles under the `--vulns-path` paths.
+fn vulns_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            return Err(format!("{} not found.", path.display()));
+        }
+        let named_like_one = path
+            .file_name()
+            .is_some_and(|name| lockfiles::is_lockfile(&name.to_string_lossy()));
+        if path.is_file() && !named_like_one {
+            return Err(format!("{} is not a lockfile this tool can read.", path.display()));
+        }
+        found.extend(lockfiles::files_under(path));
+    }
+    Ok(found)
+}
+
+/// Where online lookups cache their answers: next to the history.
+fn cache_dir() -> Result<PathBuf, String> {
+    history::history_path()
+        .and_then(|path| path.parent().map(|dir| dir.join("cache")))
+        .ok_or_else(|| "Could not determine the cache directory (HOME is not set).".to_string())
 }
 
 /// `--npm`: scans installed npm packages in detail. The exit code is 1 if a
@@ -281,14 +436,7 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let roots = if cli.npm_path.is_empty() {
         npm::all_roots(&SystemRunner::new())
     } else {
-        let mut roots = Vec::new();
-        for path in &cli.npm_path {
-            if !path.is_dir() {
-                return Err(format!("{} is not a directory.", path.display()));
-            }
-            roots.extend(npm::roots_under(path));
-        }
-        roots
+        npm_roots(&cli.npm_path)?
     };
 
     let mut scan = npm::scan(&roots);
@@ -343,14 +491,7 @@ fn run_secrets(cli: &Cli) -> Result<ExitCode, String> {
     let files = if cli.secrets_path.is_empty() {
         secrets::default_files()
     } else {
-        let mut files = Vec::new();
-        for path in &cli.secrets_path {
-            if !path.exists() {
-                return Err(format!("{} not found.", path.display()));
-            }
-            files.extend(secrets::files_under(path));
-        }
-        files
+        secret_files(&cli.secrets_path)?
     };
 
     let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
@@ -383,20 +524,7 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
     let (paths, system) = if cli.vulns_path.is_empty() {
         (lockfiles::default_files(), vulns::system_items(&SystemRunner::new()))
     } else {
-        let mut paths = Vec::new();
-        for path in &cli.vulns_path {
-            if !path.exists() {
-                return Err(format!("{} not found.", path.display()));
-            }
-            let named_like_one = path
-                .file_name()
-                .is_some_and(|name| lockfiles::is_lockfile(&name.to_string_lossy()));
-            if path.is_file() && !named_like_one {
-                return Err(format!("{} is not a lockfile this tool can read.", path.display()));
-            }
-            paths.extend(lockfiles::files_under(path));
-        }
-        (paths, vulns::System::default())
+        (vulns_paths(&cli.vulns_path)?, vulns::System::default())
     };
     // Progress goes to stderr so that it never mixes with the report.
     let progress = if !cli.quiet && std::io::stderr().is_terminal() {
@@ -407,10 +535,10 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
     let lockfiles = vulns::read_lockfiles(&paths, &progress);
 
     let scan = if cli.online {
-        let cache = history::history_path()
-            .and_then(|path| path.parent().map(|dir| dir.join("cache")))
-            .ok_or("Could not determine the cache directory (HOME is not set).")?;
-        let options = vulns::Online { cache, progress };
+        let options = vulns::Online {
+            cache: cache_dir()?,
+            progress,
+        };
         vulns::scan(&lockfiles, system, &options)
     } else {
         vulns::offline(&lockfiles, system)
@@ -613,6 +741,40 @@ mod tests {
         );
         assert!(parse(&["--secrets", "--npm"]).is_err());
         assert!(parse(&["--secrets", "--json", "--secrets-path", "a"]).is_ok());
+
+        // `--report` runs every module: the scan paths and --online narrow it,
+        // the output options of the other modes do not apply.
+        assert!(
+            parse(&[
+                "--report",
+                "r.html",
+                "--online",
+                "--npm-path",
+                "a",
+                "--vulns-path",
+                "b",
+                "--secrets-path",
+                "c"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "--report",
+                "r.html",
+                "--only",
+                "sip",
+                "--no-history",
+                "--min-score",
+                "80"
+            ])
+            .is_ok()
+        );
+        for other in ["--npm", "--vulns", "--secrets", "--json", "--tui", "--quiet"] {
+            assert!(parse(&["--report", "r.html", other]).is_err(), "{other}");
+        }
+        assert!(parse(&["--report", "r.html", "--format", "html"]).is_err());
+        assert!(parse(&["--report", "r.html", "--output", "o"]).is_err());
     }
 
     #[test]

@@ -1,0 +1,307 @@
+//! End-to-end runs of the `swordcheck` binary.
+//!
+//! Every run gets its own home directory (`HOME` and `SWORDCHECK_HOME`), so
+//! the scans see only the fixtures written here and never the real home.
+//! The audit itself reads this Mac's settings: it is read-only, like in CI.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const BIN: &str = env!("CARGO_BIN_EXE_swordcheck");
+
+/// A closed local port: with it as the proxy, every online lookup fails at
+/// once instead of reaching the network.
+const DEAD_PROXY: &str = "http://127.0.0.1:9";
+
+/// A temporary home directory that is deleted when the test ends.
+struct Home(PathBuf);
+
+impl Home {
+    fn new(label: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("swordcheck-cli-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The scans report resolved paths (/private/var/… for /var/…).
+        Self(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.0.join(relative)
+    }
+
+    fn write(&self, relative: &str, contents: &str) -> PathBuf {
+        let path = self.path(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// A project with a lockfile and one installed npm package, plus a
+    /// known malicious one when `malware` is set.
+    fn project(&self, relative: &str, malware: bool) -> PathBuf {
+        self.write(
+            &format!("{relative}/package-lock.json"),
+            r#"{"name":"app","lockfileVersion":3,"packages":{"":{"name":"app"},"node_modules/lodash":{"version":"4.17.15"}}}"#,
+        );
+        self.write(
+            &format!("{relative}/node_modules/left-pad/package.json"),
+            r#"{"name":"left-pad","version":"1.3.0"}"#,
+        );
+        if malware {
+            self.write(
+                &format!("{relative}/node_modules/event-stream/package.json"),
+                r#"{"name":"event-stream","version":"3.3.6"}"#,
+            );
+        }
+        self.path(relative)
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(BIN);
+        command
+            .args(args)
+            .env("HOME", &self.0)
+            .env("SWORDCHECK_HOME", self.path(".swordcheck"))
+            .env("NO_COLOR", "1")
+            .env_remove("NVD_API_KEY");
+        command
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A password-like value that is not written out in the source.
+fn password(seed: u64) -> String {
+    let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (0..20)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            alphabet[(state >> 33) as usize % alphabet.len()] as char
+        })
+        .collect()
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success(), "git {args:?}");
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn str(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+
+#[test]
+fn report_scans_the_home_directory() {
+    let home = Home::new("report");
+    let app = home.project("projects/app", true);
+    let tracked = password(1);
+    let pgpass = password(2);
+    home.write(
+        "projects/app/.env",
+        &format!("DATABASE_URL=postgres://app:{tracked}@db.prod.internal/app\n"),
+    );
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", ".env"]);
+    git(&app, &["commit", "-qm", "fixture"]);
+    home.write(".pgpass", &format!("db.prod.internal:5432:app:appuser:{pgpass}\n"));
+    let out = home.path("report.html");
+
+    let first = home.run(&["--report", str(&out)]);
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "malware and a leaked secret: {}",
+        stderr(&first)
+    );
+    assert!(stderr(&first).contains("Report written:"));
+    let html = std::fs::read_to_string(&out).unwrap();
+    for text in [
+        "Security check-up of this Mac",
+        "event-stream@3.3.6",
+        "~/projects/app/node_modules/event-stream",
+        "Revoke <strong>DATABASE_URL</strong> in app/.env.",
+        "~/.pgpass",
+        "1 lockfile · 1 package",
+        "Online lookups off: nothing left this Mac",
+    ] {
+        assert!(html.contains(text), "{text}");
+    }
+    assert!(
+        !html.contains(&tracked) && !html.contains(&pgpass),
+        "raw secrets never reach the page"
+    );
+
+    // The audit was saved, so the next report compares with it.
+    let history = std::fs::read_to_string(home.path(".swordcheck/history.json")).unwrap();
+    assert_eq!(history.matches("\"timestamp\"").count(), 1);
+    home.run(&["--report", str(&out)]);
+    assert!(std::fs::read_to_string(&out).unwrap().contains(" since "));
+}
+
+#[test]
+fn report_with_failed_online_lookups_is_incomplete() {
+    let home = Home::new("online");
+    let app = home.project("app", false);
+    // An exception keeps the audit out of the exit code, whatever this Mac's setting.
+    let config = home.write("audit.toml", "[exceptions]\nsip = \"not under test\"\n");
+    let out = home.path("report.html");
+    // Offline, a clean project and an exempted check: nothing to report.
+    let mut offline = vec!["--report", str(&out), "--only", "sip", "--config", str(&config)];
+    for flag in ["--vulns-path", "--npm-path", "--secrets-path"] {
+        offline.extend([flag, str(&app)]);
+    }
+    let output = home.run(&offline);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let output = home
+        .command(&[
+            "--report",
+            str(&out),
+            "--online",
+            "--only",
+            "sip",
+            "--config",
+            str(&config),
+            "--vulns-path",
+            str(&app),
+            "--npm-path",
+            str(&app),
+            "--secrets-path",
+            str(&app),
+        ])
+        .env("https_proxy", DEAD_PROXY)
+        .env("HTTPS_PROXY", DEAD_PROXY)
+        .env("http_proxy", DEAD_PROXY)
+        .env("ALL_PROXY", DEAD_PROXY)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let html = std::fs::read_to_string(&out).unwrap();
+    for text in [
+        "Online lookups on",
+        "OSV lookup failed",
+        "The OSV lookup failed, so only the built-in list was checked",
+        "0 apps and formulae",
+    ] {
+        assert!(html.contains(text), "{text}");
+    }
+    assert!(
+        !home.path(".swordcheck/history.json").exists(),
+        "--only is a partial run"
+    );
+}
+
+#[test]
+fn report_rejects_bad_paths_before_scanning() {
+    let home = Home::new("paths");
+    let app = home.project("app", false);
+    let readme = home.write("README.md", "hello\n");
+    let missing = home.path("missing");
+    let out = home.path("report.html");
+    let cases: [(&[&str], &str); 4] = [
+        (&["--vulns-path", str(&readme)], "is not a lockfile this tool can read"),
+        (&["--vulns-path", str(&missing)], "not found"),
+        (
+            &["--vulns-path", str(&app), "--npm-path", str(&missing)],
+            "is not a directory",
+        ),
+        (
+            &[
+                "--vulns-path",
+                str(&app),
+                "--npm-path",
+                str(&app),
+                "--secrets-path",
+                str(&missing),
+            ],
+            "not found",
+        ),
+    ];
+    for (paths, message) in cases {
+        let mut args = vec!["--report", str(&out)];
+        args.extend_from_slice(paths);
+        let output = home.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&output).contains(message), "{args:?}: {}", stderr(&output));
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn scan_modes_accept_paths() {
+    let home = Home::new("modes");
+    let app = home.project("app", false);
+    let app = str(&app);
+    for args in [
+        ["--npm", "--json", "--npm-path", app],
+        ["--secrets", "--json", "--secrets-path", app],
+        ["--vulns", "--json", "--vulns-path", app],
+    ] {
+        let output = home.run(&args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {}", stderr(&output));
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with('{'), "{args:?}");
+    }
+    let output = home
+        .command(&["--vulns", "--online", "--quiet", "--vulns-path", app])
+        .env("https_proxy", DEAD_PROXY)
+        .env("HTTPS_PROXY", DEAD_PROXY)
+        .env("ALL_PROXY", DEAD_PROXY)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+}
+
+#[test]
+fn audit_keeps_going_when_the_history_is_unusable() {
+    // A corrupt history is reported and left alone.
+    let home = Home::new("corrupt");
+    let history = home.write(".swordcheck/history.json", "{not json");
+    let output = home.run(&["--format", "json"]);
+    assert_ne!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("history unavailable"), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(&history).unwrap(), "{not json");
+
+    // A history folder that cannot be written to: the audit still reports.
+    let home = Home::new("readonly");
+    let folder = home.path(".swordcheck");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mode = |mode| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(0o500);
+    let output = home.run(&["--format", "json"]);
+    mode(0o700);
+    assert_ne!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("could not save history"),
+        "{}",
+        stderr(&output)
+    );
+}
