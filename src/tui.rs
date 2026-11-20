@@ -331,13 +331,20 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
     )];
     if scan.online {
         let exploited = scan.exploited();
-        headline.push((
-            if exploited > 0 { Tone::Bad } else { Tone::Good },
-            format!(
-                "{} findings · {exploited} known-exploited or malware",
-                scan.findings.len()
-            ),
-        ));
+        let mut summary = format!(
+            "{} findings · {exploited} known-exploited or malware",
+            scan.findings.len()
+        );
+        // A failed lookup may hide an exploited vulnerability: no green all-clear.
+        let tone = match (exploited, scan.warnings.is_empty()) {
+            (1.., _) => Tone::Bad,
+            (0, true) => Tone::Good,
+            (0, false) => {
+                summary.push_str(" · incomplete: some lookups failed (below)");
+                Tone::Warn
+            }
+        };
+        headline.push((tone, summary));
     } else {
         headline.push((
             Tone::Warn,
@@ -1121,29 +1128,59 @@ fn draw_running(frame: &mut Frame, area: Rect, job: &Job, elapsed: Duration) {
     frame.render_widget(Paragraph::new(notes), notes_area);
 }
 
+/// Splits `text` into rows at most `width` columns wide, as the terminal
+/// shows them: wide characters (CJK, most emoji) take two columns. Rows break
+/// between words; a word longer than a row is broken inside.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    let columns = |text: &str| Span::raw(text).width();
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for (index, word) in text.split(' ').enumerate() {
+        let gap = usize::from(index > 0);
+        if columns(&row) + gap + columns(word) <= width {
+            if index > 0 {
+                row.push(' ');
+            }
+            row.push_str(word);
+            continue;
+        }
+        // The word goes to a new row, broken into pieces if it is too long.
+        if !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+        }
+        for c in word.chars() {
+            let mut buffer = [0; 4];
+            if !row.is_empty() && columns(&row) + columns(c.encode_utf8(&mut buffer)) > width {
+                rows.push(std::mem::take(&mut row));
+            }
+            row.push(c);
+        }
+    }
+    rows.push(row);
+    rows
+}
+
 fn draw_results(frame: &mut Frame, area: Rect, view: &mut ResultView) {
     // Long lines (warnings above all) wrap instead of being cut off, so the
-    // header grows with them, up to half the screen.
+    // header grows with them, up to half the screen. The rows are wrapped
+    // here and drawn as they are, so the height always matches what is drawn.
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let wrapped: usize = view
+    let headline: Vec<Line> = view
         .headline
         .iter()
-        .map(|(_, text)| (text.chars().count() + 1).div_ceil(inner_width).max(1))
-        .sum();
-    let header_height = (wrapped as u16 + 2).min((area.height / 2).max(3));
+        .flat_map(|(tone, text)| {
+            wrap_to_width(&format!(" {text}"), inner_width)
+                .into_iter()
+                .map(|row| Line::from(Span::styled(row, tone.style())))
+        })
+        .collect();
+    let header_height = (headline.len() as u16 + 2).min((area.height / 2).max(3));
     let [header, body] = Layout::vertical([Constraint::Length(header_height), Constraint::Min(5)]).areas(area);
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
 
-    let headline: Vec<Line> = view
-        .headline
-        .iter()
-        .map(|(tone, text)| Line::from(Span::styled(format!(" {text}"), tone.style())))
-        .collect();
     let title = format!(" {} ", view.module.title());
-    let headline = Paragraph::new(headline)
-        .block(Block::bordered().title(title))
-        .wrap(Wrap { trim: false });
+    let headline = Paragraph::new(headline).block(Block::bordered().title(title));
     frame.render_widget(headline, header);
 
     let width = view
@@ -1520,6 +1557,41 @@ mod tests {
     }
 
     #[test]
+    fn warnings_with_long_urls_or_wide_characters_are_not_cut_off() {
+        // Word wrapping cannot break a URL, and CJK characters take two
+        // columns: counting characters made the header too short for both.
+        let url = "EPSS lookup failed (curl: (28) timed out after 60000 milliseconds \
+                   https://api.first.org/data/v1/epss?cve=CVE-2024-21626,CVE-2024-3094,CVE-2023-44487,CVE-2023-4863,CVE-2021-44228 \
+                   https://api.first.org/data/v1/epss?cve=CVE-2022-22965,CVE-2023-34362,CVE-2024-1086,CVE-2023-20198,CVE-2022-1388); \
+                   END-OF-URL-WARNING";
+        let wide = "Could not read /Users/田中太郎/プロジェクト/在庫管理システム/フロントエンド/パッケージ/サブモジュール/package-lock.json END-OF-WIDE-WARNING";
+        let mut app = app();
+        app.screen = Screen::Results(ResultView::new(
+            Module::Vulns,
+            vec![
+                (Tone::Plain, "1 lockfiles".into()),
+                (Tone::Warn, url.into()),
+                (Tone::Warn, wide.into()),
+            ],
+            vec![row("KEV", "pkg 1.0")],
+            "",
+        ));
+        let screen = render(&mut app);
+        assert!(screen.contains("END-OF-URL-WARNING"), "{screen}");
+        assert!(screen.contains("END-OF-WIDE-WARNING"), "{screen}");
+        assert!(screen.contains("pkg 1.0"), "the list still fits below the header");
+    }
+
+    #[test]
+    fn header_rows_wrap_at_display_width() {
+        assert_eq!(wrap_to_width("abcd efgh", 9), ["abcd efgh"]);
+        assert_eq!(wrap_to_width("abcd efghi", 9), ["abcd", "efghi"]);
+        assert_eq!(wrap_to_width(" ab cdefghij", 4), [" ab", "cdef", "ghij"]);
+        assert_eq!(wrap_to_width("abc田", 4), ["abc", "田"]);
+        assert_eq!(wrap_to_width("", 5), [""]);
+    }
+
+    #[test]
     fn failed_npm_lookup_is_not_reported_as_switched_off() {
         let scan = npm::scan(&[]);
         let failed = npm_view(&scan, Some(Err("offline".into())));
@@ -1553,6 +1625,58 @@ mod tests {
             view.rows[0]
                 .detail
                 .contains(&Detail::Text(secrets::GIT_UNKNOWN_ADVICE.into()))
+        );
+    }
+
+    #[test]
+    fn vulnerability_summary_is_not_green_when_lookups_failed() {
+        let summary = |warnings: Vec<String>, kev: bool| {
+            let mut scan = vulns::Scan {
+                online: true,
+                warnings,
+                ..vulns::Scan::default()
+            };
+            if kev {
+                scan.system.push(vulns::SystemItem {
+                    source: vulns::Source::App,
+                    name: "Chrome".into(),
+                    version: "1.0".into(),
+                    cpe: "cpe:2.3:a:google:chrome:1.0".into(),
+                    checked: true,
+                    error: None,
+                    exploited: vec![vulns::SystemVuln {
+                        cve: "CVE-2023-7024".into(),
+                        name: "WebRTC".into(),
+                        date_added: "2024-01-02".into(),
+                    }],
+                });
+            }
+            vulns_view(&scan).headline[1].clone()
+        };
+        let failed = || vec!["CISA KEV download failed: timeout".to_string()];
+
+        let (tone, text) = summary(Vec::new(), false);
+        assert_eq!(
+            (tone, text.as_str()),
+            (Tone::Good, "0 findings · 0 known-exploited or malware")
+        );
+        let (tone, text) = summary(failed(), false);
+        assert_eq!(tone, Tone::Warn);
+        assert!(text.ends_with("incomplete: some lookups failed (below)"), "{text}");
+        let (tone, text) = summary(failed(), true);
+        assert_eq!(tone, Tone::Bad, "an exploited product stays red");
+        assert!(!text.contains("incomplete"), "{text}");
+        // The failed lookup itself is still listed below the summary.
+        let scan = vulns::Scan {
+            online: true,
+            warnings: failed(),
+            ..vulns::Scan::default()
+        };
+        assert!(
+            vulns_view(&scan)
+                .headline
+                .iter()
+                .any(|(tone, text)| *tone == Tone::Warn && text.contains("CISA KEV"))
         );
     }
 

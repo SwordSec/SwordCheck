@@ -1670,11 +1670,22 @@ impl VulnReport {
         for warning in &scan.warnings {
             let _ = writeln!(out, "{} {warning}", "Warning:".yellow());
         }
-        match scan.exploited() {
-            0 => {
+        // A failed lookup (KEV catalog, OSV, NVD) may hide an exploited
+        // vulnerability, so its absence is only reported for what was checked.
+        match (scan.exploited(), scan.warnings.is_empty()) {
+            (0, true) => {
                 let _ = writeln!(out, "{}", "No known-exploited vulnerabilities found.".green().bold());
             }
-            count => {
+            (0, false) => {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    "No known-exploited vulnerabilities found in what could be checked; the failed lookups above may hide some."
+                        .yellow()
+                        .bold()
+                );
+            }
+            (count, _) => {
                 let _ = writeln!(
                     out,
                     "{}",
@@ -2102,6 +2113,29 @@ mod tests {
         let merged = merge_duplicates(vec![plain, ransomware]);
         assert_eq!(merged.len(), 1);
         assert!(merged[0].kev.as_ref().unwrap().ransomware);
+    }
+
+    #[test]
+    fn failed_lookups_are_not_reported_as_all_clear() {
+        colored::control::set_override(false);
+        let text = |warnings: Vec<String>, kev: bool| {
+            let scan = Scan {
+                online: true,
+                findings: vec![finding("lodash", Severity::High, None, kev)],
+                warnings,
+                ..Scan::default()
+            };
+            VulnReport::new(String::new(), scan).to_text()
+        };
+        let all_clear = "No known-exploited vulnerabilities found.";
+        let failed = vec!["CISA KEV download failed: timeout".to_string()];
+
+        assert!(text(Vec::new(), false).lines().any(|line| line == all_clear));
+        let incomplete = text(failed.clone(), false);
+        assert!(!incomplete.lines().any(|line| line == all_clear), "{incomplete}");
+        assert!(incomplete.contains("found in what could be checked; the failed lookups above may hide some."));
+        // An exploited finding is reported as such, failed lookups or not.
+        assert!(text(failed, true).contains("Known-exploited vulnerabilities found: 1. Fix these first."));
     }
 
     #[test]
