@@ -465,9 +465,7 @@ pub fn system_items(runner: &dyn CommandRunner) -> System {
 /// `~/Applications`.
 fn app_items(runner: &dyn CommandRunner) -> System {
     let mut dirs = vec![PathBuf::from("/Applications")];
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(Path::new(&home).join("Applications"));
-    }
+    dirs.extend(std::env::var_os("HOME").map(|home| Path::new(&home).join("Applications")));
     app_items_in(runner, &dirs)
 }
 
