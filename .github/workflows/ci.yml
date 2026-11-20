@@ -14,11 +14,20 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in step with the version used locally for the changed-lines check.
+  CARGO_LLVM_COV_VERSION: 0.9.2
+
+defaults:
+  run:
+    # `bash -eo pipefail`: a failing command in a pipe fails the step.
+    shell: bash
 
 jobs:
-  check:
-    name: Build, test and lint
-    runs-on: macos-latest
+  # Format and lint do not run anything macOS-specific, so they use the
+  # faster Linux runners and leave the macOS runner to the tests.
+  format:
+    name: Format
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,7 +35,23 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Format
+        run: cargo fmt --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -35,16 +60,45 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-
-      - name: Format
-        run: cargo fmt --check
+          key: cargo-lint-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Lint
         run: cargo clippy --all-targets --locked -- -D warnings
 
+  test:
+    name: Test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The changed-lines check diffs against the base commit of the PR.
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview
+          rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            target
+          key: cargo-test-${{ runner.os }}-${{ env.CARGO_LLVM_COV_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! cargo llvm-cov --version 2>/dev/null | grep -q "$CARGO_LLVM_COV_VERSION"; then
+            cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
+          fi
+
+      # One instrumented run gives the test results and the coverage data.
+      # It includes tests/cli.rs, which runs the binary end to end.
       - name: Test
-        run: cargo test --locked
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info 2>&1 | tee test.log
 
       - name: Smoke test
         run: |
@@ -52,3 +106,32 @@ jobs:
           cargo run --locked --quiet -- --list
           # Offline inventory of this repository's own lockfile.
           cargo run --locked --quiet -- --vulns --vulns-path Cargo.lock --quiet
+
+      - name: Test summary
+        if: ${{ !cancelled() }}
+        run: python3 .github/scripts/ci_summary.py tests test.log
+
+      # Every line a pull request adds or changes under src/ must be run by a test.
+      - name: Coverage of changed lines
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .github/scripts/ci_summary.py coverage "$BASE_SHA" lcov.info
+
+  # The single check that branch protection requires. It passes only when
+  # every job above passed, so jobs can be added or renamed without
+  # changing the protection settings.
+  all:
+    name: Build, test and lint
+    if: ${{ always() }}
+    needs: [format, lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "format, lint, test: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = success ] || exit 1
+          done
