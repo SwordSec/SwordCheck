@@ -180,7 +180,7 @@ fn kill_tree(child: &mut Child) {
     let mut pids = vec![child.id().to_string()];
     let mut next = 0;
     while next < pids.len() {
-        let children = Command::new("/usr/bin/pgrep")
+        let children: Vec<String> = Command::new("/usr/bin/pgrep")
             .args(["-P", &pids[next]])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -191,7 +191,7 @@ fn kill_tree(child: &mut Child) {
                     .map(str::to_string)
                     .collect()
             })
-            .unwrap_or_else(|_| Vec::new());
+            .unwrap_or_default();
         pids.extend(children);
         next += 1;
     }
