@@ -60,7 +60,7 @@ use std::process::ExitCode;
     disable_version_flag = true,
     override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns / --report with --online;\n     --secrets / --report when git could not tell whether a file is tracked)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n     (--report: also malware, a known-exploited vulnerability or a secret in a git-tracked file)\n  2  usage or configuration error\n  3  the scan is incomplete: an online lookup failed (--npm / --vulns / --report with --online),\n     a lockfile could not be read (--vulns / --report), or git could not tell whether\n     a file with a secret is tracked (--secrets / --report)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
 ,
     // The path options of a scan also narrow that scan inside `--report`.
     group(ArgGroup::new("npm_scope").args(["npm", "report"])),
@@ -346,8 +346,8 @@ fn run_report(
     } else {
         vulns::System::default()
     };
-    let lockfiles = vulns::read_lockfiles(&lockfile_paths, &progress);
-    let vulns = if cli.online {
+    let (lockfiles, skipped) = vulns::read_lockfiles(&lockfile_paths, &progress);
+    let mut vulns = if cli.online {
         let options = vulns::Online {
             cache: cache_dir()?,
             progress: progress.clone(),
@@ -356,6 +356,7 @@ fn run_report(
     } else {
         vulns::offline(&lockfiles, system)
     };
+    vulns.skipped = skipped;
 
     let mut npm = npm::scan_with(&npm_roots, &progress);
     let npm_lookup = cli
@@ -547,9 +548,9 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
     } else {
         progress::Progress::none()
     };
-    let lockfiles = vulns::read_lockfiles(&paths, &progress);
+    let (lockfiles, skipped) = vulns::read_lockfiles(&paths, &progress);
 
-    let scan = if cli.online {
+    let mut scan = if cli.online {
         let options = vulns::Online {
             cache: cache_dir()?,
             progress,
@@ -558,6 +559,7 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
     } else {
         vulns::offline(&lockfiles, system)
     };
+    scan.skipped = skipped;
 
     let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let report = vulns::VulnReport::new(timestamp, scan);
@@ -570,16 +572,17 @@ fn run_vulns(cli: &Cli) -> Result<ExitCode, String> {
     };
     emit(cli, &rendered)?;
 
-    // A failed lookup may hide an exploited vulnerability: never report success.
-    Ok(match (exploited > 0, report.scan.warnings.is_empty()) {
+    // A failed lookup or an unread lockfile may hide an exploited
+    // vulnerability: never report success.
+    Ok(match (exploited > 0, report.scan.incomplete()) {
         (true, _) => ExitCode::FAILURE,
-        (false, false) => ExitCode::from(EXIT_INCOMPLETE),
-        (false, true) => ExitCode::SUCCESS,
+        (false, true) => ExitCode::from(EXIT_INCOMPLETE),
+        (false, false) => ExitCode::SUCCESS,
     })
 }
 
-/// Exit code for a scan whose online lookup failed: the result is incomplete,
-/// so a script must not read it as "nothing found".
+/// Exit code for a scan that is incomplete (a lookup failed, a lockfile could
+/// not be read): a script must not read it as "nothing found".
 const EXIT_INCOMPLETE: u8 = 3;
 
 /// The scan modes only have a text and a JSON report.

@@ -335,12 +335,13 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
             "{} findings · {exploited} known-exploited or malware",
             scan.findings.len()
         );
-        // A failed lookup may hide an exploited vulnerability: no green all-clear.
-        let tone = match (exploited, scan.warnings.is_empty()) {
+        // A failed lookup or an unread lockfile may hide an exploited
+        // vulnerability: no green all-clear.
+        let tone = match (exploited, scan.incomplete()) {
             (1.., _) => Tone::Bad,
-            (0, true) => Tone::Good,
-            (0, false) => {
-                summary.push_str(" · incomplete: some lookups failed (below)");
+            (0, false) => Tone::Good,
+            (0, true) => {
+                summary.push_str(" · incomplete: see the warnings below");
                 Tone::Warn
             }
         };
@@ -352,6 +353,8 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
         ));
     }
     headline.extend(scan.unmatched_note().map(|note| (Tone::Dim, note)));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    headline.extend(scan.skipped_note(home.as_deref()).map(|note| (Tone::Warn, note)));
     headline.extend(scan.warnings.iter().map(|warning| (Tone::Warn, warning.clone())));
     ResultView::new(
         Module::Vulns,
@@ -647,9 +650,9 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             let paths = lockfiles::default_files();
             progress.stage("Listing macOS, installed applications and Homebrew formulae");
             let system = vulns::system_items(&runner);
-            let lockfiles = vulns::read_lockfiles(&paths, progress);
+            let (lockfiles, skipped) = vulns::read_lockfiles(&paths, progress);
             let cache = history::history_path().and_then(|path| path.parent().map(|dir| dir.join("cache")));
-            let scan = match (online, cache) {
+            let mut scan = match (online, cache) {
                 (true, Some(cache)) => vulns::scan(
                     &lockfiles,
                     system,
@@ -660,6 +663,7 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
                 ),
                 _ => vulns::offline(&lockfiles, system),
             };
+            scan.skipped = skipped;
             Outcome::View(vulns_view(&scan))
         }
         Module::Npm => {
@@ -1662,7 +1666,7 @@ mod tests {
         );
         let (tone, text) = summary(failed(), false);
         assert_eq!(tone, Tone::Warn);
-        assert!(text.ends_with("incomplete: some lookups failed (below)"), "{text}");
+        assert!(text.ends_with("incomplete: see the warnings below"), "{text}");
         let (tone, text) = summary(failed(), true);
         assert_eq!(tone, Tone::Bad, "an exploited product stays red");
         assert!(!text.contains("incomplete"), "{text}");
@@ -1862,6 +1866,78 @@ mod tests {
             record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26"),
             "history unavailable (HOME is not set)"
         );
+    }
+
+    #[test]
+    fn unread_lockfiles_are_shown_and_not_green() {
+        let scan = vulns::Scan {
+            online: true,
+            skipped: vec![vulns::Skipped {
+                path: PathBuf::from("/nowhere/app/requirements.txt"),
+                reason: "over 64 MB",
+            }],
+            ..vulns::Scan::default()
+        };
+        let view = vulns_view(&scan);
+        assert_eq!(view.headline[1].0, Tone::Warn);
+        assert!(view.headline[1].1.ends_with("incomplete: see the warnings below"));
+        assert!(view.headline.iter().any(|(tone, text)| *tone == Tone::Warn
+            && text
+                == "1 lockfile could not be read, so the packages they pin were not checked: \
+                        /nowhere/app/requirements.txt (over 64 MB)"));
+    }
+
+    /// The vulnerability worker reads HOME, so it runs in a child process of
+    /// this test binary with a HOME of its own; this process's environment
+    /// is left alone.
+    #[test]
+    fn the_vulnerability_worker_passes_on_unread_lockfiles() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("SWORDCHECK_WORKER_TEST").is_some() {
+            let setup = Setup {
+                save_history: false,
+                check_ids: Vec::new(),
+                config: Config::default(),
+                os_version: "macOS 26".into(),
+            };
+            let (progress, _events) = Progress::channel();
+            let outcome = work(Module::Vulns, false, &setup, &progress);
+            let reported = |view: &ResultView| {
+                view.headline.iter().any(|(_, line)| {
+                    line.starts_with("1 lockfile could not be read")
+                        && line.ends_with("~/app/package-lock.json (permission denied)")
+                })
+            };
+            assert!(matches!(&outcome, Outcome::View(view) if reported(view)));
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("swordcheck-tui-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("app")).unwrap();
+        let lockfile = home.join("app/package-lock.json");
+        std::fs::write(
+            &lockfile,
+            r#"{"lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&lockfile, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::tests::the_vulnerability_worker_passes_on_unread_lockfiles",
+                "--nocapture",
+            ])
+            .env("SWORDCHECK_WORKER_TEST", "1")
+            .env("HOME", &home)
+            .env("SWORDCHECK_HOME", home.join(".swordcheck"))
+            .output()
+            .unwrap();
+        std::fs::set_permissions(&lockfile, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{out}{err}");
+        assert!(out.contains("1 passed"), "the child ran the test: {out}");
     }
 
     #[test]

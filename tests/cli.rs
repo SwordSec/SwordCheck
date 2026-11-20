@@ -475,3 +475,46 @@ fn secrets_say_when_git_cannot_tell_whether_a_file_is_tracked() {
         }
     }
 }
+
+#[test]
+fn a_lockfile_that_cannot_be_read_makes_the_scan_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("unread");
+    let app = home.project("app", false);
+    let locked = home.write(
+        "other/package-lock.json",
+        r#"{"lockfileVersion":3,"packages":{"node_modules/axios":{"version":"0.21.0"}}}"#,
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let config = home.write("audit.toml", "[exceptions]\nsip = \"not under test\"\n");
+    let out = home.path("report.html");
+
+    let vulns = home.run(&["--vulns", "--json", "--vulns-path", str(&home.0)]);
+    let report = home.run(&[
+        "--report",
+        str(&out),
+        "--only",
+        "sip",
+        "--config",
+        str(&config),
+        "--vulns-path",
+        str(&home.0),
+        "--npm-path",
+        str(&app),
+        "--secrets-path",
+        str(&app),
+    ]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let json = String::from_utf8_lossy(&vulns.stdout);
+    assert_eq!(
+        vulns.status.code(),
+        Some(3),
+        "an unread lockfile is not a clean scan: {json}"
+    );
+    assert!(json.contains("\"reason\": \"permission denied\""), "{json}");
+    assert!(json.contains("other/package-lock.json"), "{json}");
+    assert_eq!(report.status.code(), Some(3), "{}", stderr(&report));
+    let html = std::fs::read_to_string(&out).unwrap();
+    assert!(html.contains("1 lockfile could not be read"), "the report says so");
+}

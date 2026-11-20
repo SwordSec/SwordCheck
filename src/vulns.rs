@@ -201,6 +201,17 @@ pub struct Scan {
     pub projects: Vec<ProjectSummary>,
     /// Lookups that failed; the rest of the scan is still reported.
     pub warnings: Vec<String>,
+    /// Lockfiles that were found but could not be read: the packages they
+    /// pin were not checked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
+}
+
+/// A lockfile that could not be read, and why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Skipped {
+    pub path: PathBuf,
+    pub reason: &'static str,
 }
 
 impl Scan {
@@ -211,6 +222,36 @@ impl Scan {
 
     fn exploited_dependencies(&self) -> usize {
         self.findings.iter().filter(|f| f.kev.is_some() || f.malware).count()
+    }
+
+    /// Is part of the scan missing: a lookup failed or a lockfile could not
+    /// be read? Then "nothing found" is not a clean result.
+    pub fn incomplete(&self) -> bool {
+        !self.warnings.is_empty() || !self.skipped.is_empty()
+    }
+
+    /// Names the lockfiles that could not be read, if any.
+    pub fn skipped_note(&self, home: Option<&Path>) -> Option<String> {
+        let files: Vec<String> = self
+            .skipped
+            .iter()
+            .map(|skipped| {
+                format!(
+                    "{} ({})",
+                    crate::secrets::display_path(&skipped.path, home),
+                    skipped.reason
+                )
+            })
+            .collect();
+        let count = match files.len() {
+            0 => return None,
+            1 => "1 lockfile".to_string(),
+            many => format!("{many} lockfiles"),
+        };
+        Some(format!(
+            "{count} could not be read, so the packages they pin were not checked: {}",
+            files.join(", ")
+        ))
     }
 
     /// Says how many Homebrew formulae were left out, if any.
@@ -230,23 +271,32 @@ impl Scan {
 
 // ---- Inventory ----
 
-/// Parses the given lockfiles, dropping those without any package.
-pub fn read_lockfiles(paths: &[PathBuf], progress: &Progress) -> Vec<Lockfile> {
+/// Parses the given lockfiles, dropping those without any package. Those
+/// that cannot be read are returned apart, so the scan can say so.
+pub fn read_lockfiles(paths: &[PathBuf], progress: &Progress) -> (Vec<Lockfile>, Vec<Skipped>) {
     progress.stage(format!("Reading {} lockfiles", paths.len()));
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut lockfiles = Vec::new();
+    let mut skipped = Vec::new();
     for (index, path) in paths.iter().enumerate() {
-        if let Some(lockfile) = lockfiles::parse_file(path).filter(|lockfile| !lockfile.packages.is_empty()) {
-            progress.note(format!(
-                "{} ({} packages)",
-                crate::secrets::display_path(path, home.as_deref()),
-                lockfile.packages.len()
-            ));
-            lockfiles.push(lockfile);
+        match lockfiles::parse_file(path) {
+            Ok(Some(lockfile)) if !lockfile.packages.is_empty() => {
+                progress.note(format!(
+                    "{} ({} packages)",
+                    crate::secrets::display_path(path, home.as_deref()),
+                    lockfile.packages.len()
+                ));
+                lockfiles.push(lockfile);
+            }
+            Ok(_) => {}
+            Err(reason) => skipped.push(Skipped {
+                path: path.clone(),
+                reason,
+            }),
         }
         progress.step(index + 1, paths.len());
     }
-    lockfiles
+    (lockfiles, skipped)
 }
 
 /// An application we know how to look up: bundle identifier → NVD
@@ -714,6 +764,8 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
         unmatched_formulae,
         findings,
         warnings,
+        // Filled in by the caller, which read the lockfiles.
+        skipped: Vec::new(),
     }
 }
 
@@ -1493,6 +1545,9 @@ impl VulnReport {
         if !ecosystems.is_empty() {
             let _ = writeln!(out, " {}", ecosystems.join(" · ").dimmed());
         }
+        if let Some(note) = scan.skipped_note(home.as_deref()) {
+            let _ = writeln!(out, " {}", note.yellow());
+        }
         let _ = writeln!(out, "{rule}");
 
         if !scan.online {
@@ -1670,17 +1725,18 @@ impl VulnReport {
         for warning in &scan.warnings {
             let _ = writeln!(out, "{} {warning}", "Warning:".yellow());
         }
-        // A failed lookup (KEV catalog, OSV, NVD) may hide an exploited
-        // vulnerability, so its absence is only reported for what was checked.
-        match (scan.exploited(), scan.warnings.is_empty()) {
-            (0, true) => {
+        // A failed lookup (KEV catalog, OSV, NVD) or a lockfile that could not
+        // be read may hide an exploited vulnerability, so its absence is only
+        // reported for what was checked.
+        match (scan.exploited(), scan.incomplete()) {
+            (0, false) => {
                 let _ = writeln!(out, "{}", "No known-exploited vulnerabilities found.".green().bold());
             }
-            (0, false) => {
+            (0, true) => {
                 let _ = writeln!(
                     out,
                     "{}",
-                    "No known-exploited vulnerabilities found in what could be checked; the failed lookups above may hide some."
+                    "No known-exploited vulnerabilities found in what could be checked; what could not be checked (above) may hide some."
                         .yellow()
                         .bold()
                 );
@@ -2133,9 +2189,90 @@ mod tests {
         assert!(text(Vec::new(), false).lines().any(|line| line == all_clear));
         let incomplete = text(failed.clone(), false);
         assert!(!incomplete.lines().any(|line| line == all_clear), "{incomplete}");
-        assert!(incomplete.contains("found in what could be checked; the failed lookups above may hide some."));
+        assert!(
+            incomplete.contains("found in what could be checked; what could not be checked (above) may hide some.")
+        );
         // An exploited finding is reported as such, failed lookups or not.
         assert!(text(failed, true).contains("Known-exploited vulnerabilities found: 1. Fix these first."));
+    }
+
+    #[test]
+    fn lockfiles_that_cannot_be_read_are_reported_not_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("swordcheck-vulns-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for project in ["ok", "locked", "latin1", "empty"] {
+            std::fs::create_dir_all(dir.join(project)).unwrap();
+        }
+        let write = |relative: &str, contents: &[u8]| {
+            let path = dir.join(relative);
+            std::fs::write(&path, contents).unwrap();
+            path
+        };
+        let lock = |name: &str| {
+            format!(r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/{name}":{{"version":"1.0.0"}}}}}}"#)
+        };
+        let ok = write("ok/package-lock.json", lock("lodash").as_bytes());
+        let locked = write("locked/package-lock.json", lock("axios").as_bytes());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let latin1 = write("latin1/requirements.txt", b"requests==2.19.0\n# caf\xe9\n");
+        let empty = write(
+            "empty/package-lock.json",
+            br#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+        );
+
+        let (read, skipped) = read_lockfiles(&[ok.clone(), locked.clone(), latin1.clone(), empty], &Progress::none());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(read.iter().map(|lockfile| &lockfile.path).collect::<Vec<_>>(), [&ok]);
+        assert_eq!(
+            skipped,
+            [
+                Skipped {
+                    path: locked,
+                    reason: "permission denied"
+                },
+                Skipped {
+                    path: latin1,
+                    reason: "not UTF-8 or UTF-16 text"
+                },
+            ],
+            "an empty lockfile is not unread"
+        );
+
+        let mut scan = offline(&read, System::default());
+        assert!(!scan.incomplete() && scan.skipped_note(None).is_none());
+        scan.skipped = skipped;
+        assert!(scan.incomplete());
+        let note = scan.skipped_note(Some(&dir)).unwrap();
+        assert_eq!(
+            note,
+            "2 lockfiles could not be read, so the packages they pin were not checked: \
+             ~/locked/package-lock.json (permission denied), ~/latin1/requirements.txt (not UTF-8 or UTF-16 text)"
+        );
+        scan.skipped.truncate(1);
+        assert!(
+            scan.skipped_note(None)
+                .unwrap()
+                .starts_with("1 lockfile could not be read")
+        );
+
+        // The text report says it, offline and online, and never gives the all-clear.
+        colored::control::set_override(false);
+        let offline_scan = Scan {
+            skipped: scan.skipped.clone(),
+            ..Scan::default()
+        };
+        assert!(
+            VulnReport::new(String::new(), offline_scan)
+                .to_text()
+                .contains("1 lockfile could not be read")
+        );
+        scan.online = true;
+        let text = VulnReport::new(String::new(), scan).to_text();
+        assert!(text.contains("1 lockfile could not be read"), "{text}");
+        assert!(text.contains("found in what could be checked; what could not be checked (above) may hide some."));
     }
 
     #[test]

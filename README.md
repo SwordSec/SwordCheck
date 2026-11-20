@@ -123,11 +123,13 @@ means the advice points to the place in System Settings (or Recovery).
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
 | 2 | Usage or configuration error |
-| 3 | `--npm` / `--vulns` / `--report` with `--online`: a lookup failed, so the scan is incomplete; `--secrets` / `--report`: git could not tell whether a file with a secret is tracked |
+| 3 | The scan is incomplete: `--npm` / `--vulns` / `--report` with `--online`: a lookup failed; `--vulns` / `--report`: a lockfile could not be read (no permission, over 64 MB, not UTF-8/UTF-16 text); `--secrets` / `--report`: git could not tell whether a file with a secret is tracked |
 
 The scan modes use 1 for their own "found something" condition (described in
-each section) and 3 when an online lookup failed and nothing was found in the
-part that did work: a script must not read an incomplete scan as a clean one.
+each section) and 3 when part of the scan could not be done and nothing was
+found in the part that did work: a script must not read an incomplete scan as
+a clean one. Lockfiles that could not be read are named in the report and
+listed under `skipped` in the JSON output.
 The dashboard is interactive and always exits with 0.
 
 ## Secret scan (`--secrets`)
