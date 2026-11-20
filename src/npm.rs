@@ -273,6 +273,15 @@ impl Scan {
         self.findings.iter().filter(|finding| finding.kind == Kind::Unread)
     }
 
+    /// Looks the installed packages up in OSV and adds the malicious package
+    /// records found. If a request failed, the records found before it are
+    /// still added and the error is returned, so the scan reads as incomplete.
+    pub fn lookup_osv(&mut self, progress: &Progress) -> Result<(), String> {
+        let (hits, error) = osv_lookup_with(&self.installed, progress);
+        self.add_osv(hits);
+        error.map_or(Ok(()), Err)
+    }
+
     /// Adds OSV results to the findings. Packages already caught by the
     /// embedded list are not duplicated.
     pub fn add_osv(&mut self, hits: Vec<OsvHit>) {
@@ -725,14 +734,11 @@ pub struct OsvHit {
     pub ids: Vec<String>,
 }
 
-/// Queries OSV.dev about the installed packages. Only package names and
-/// versions are sent out; no file paths or contents are sent.
-pub fn osv_lookup(installed: &Installed) -> Result<Vec<OsvHit>, String> {
-    osv_lookup_with(installed, &Progress::none())
-}
-
-/// Like `osv_lookup`, reporting each batch.
-pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> Result<Vec<OsvHit>, String> {
+/// Queries OSV.dev about the installed packages, reporting each batch. Only
+/// package names and versions are sent out; no file paths or contents are
+/// sent. Returns the malicious package records found and, if a request
+/// failed, why; what was found before the failure is kept.
+pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> (Vec<OsvHit>, Option<String>) {
     // Packages without a version (e.g. installed from git) cannot be queried.
     let packages: Vec<&(String, String)> = installed.keys().filter(|(_, version)| !version.is_empty()).collect();
 
@@ -745,8 +751,8 @@ pub fn osv_lookup_with(installed: &Installed, progress: &Progress) -> Result<Vec
             version,
         })
         .collect();
-    let results = osv::query(&queries, |done, total| progress.step(done, total))?;
-    Ok(malware_hits(&packages, results))
+    let (results, error) = osv::query(&queries, |done, total| progress.step(done, total));
+    (malware_hits(&packages, results), error)
 }
 
 /// Vulnerability (GHSA/CVE) records are out of scope here; only `MAL-`
