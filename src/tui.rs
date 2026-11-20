@@ -616,8 +616,8 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             checks.retain(|check| setup.check_ids.iter().any(|id| id == check.id()));
             let results = checks::run_checks_with(&checks, &runner, &setup.config, progress);
             // A cancelled audit is not a result worth recording.
-            let trend =
-                (setup.save_history && !progress.cancelled()).then(|| record_audit(&results, &setup.os_version));
+            let trend = (setup.save_history && !progress.cancelled())
+                .then(|| record_audit(history::history_path().as_deref(), &results, &setup.os_version));
             Outcome::Audit(results, trend)
         }
         Module::Vulns => {
@@ -656,12 +656,18 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
 }
 
 /// Saves a dashboard audit to the history, like the command line does, and
-/// describes how it compares with the previous one.
-fn record_audit(results: &[CheckResult], os_version: &str) -> String {
-    let Some(path) = history::history_path() else {
+/// describes how it compares with the previous one. `path` is the history
+/// file (`history::history_path()`), `None` when HOME is not set.
+fn record_audit(path: Option<&Path>, results: &[CheckResult], os_version: &str) -> String {
+    let Some(path) = path else {
         return "history unavailable (HOME is not set)".to_string();
     };
-    let records = match history::load(&path) {
+    // Like the command line: a run in which nothing could be evaluated has no
+    // score worth comparing or saving.
+    if score::score_if_scorable(results).is_none() {
+        return "not recorded: no check could be evaluated".to_string();
+    }
+    let records = match history::load(path) {
         Ok(records) => records,
         // A corrupt history is left alone rather than overwritten.
         Err(err) => return format!("history unavailable: {err}"),
@@ -677,7 +683,7 @@ fn record_audit(results: &[CheckResult], os_version: &str) -> String {
     };
     let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let record = history::RunRecord::new(timestamp, os_version.to_string(), score, results);
-    match history::append(&path, records, record) {
+    match history::append(path, records, record) {
         Ok(()) => trend,
         Err(err) => format!("{trend}; not saved: {err}"),
     }
@@ -1623,6 +1629,42 @@ mod tests {
         assert!(view.headline[0].1.contains("1 secrets · 2 locations"));
         let everything = format!("{:?}{:?}", view.rows, view.headline);
         assert!(!everything.contains(&key), "the raw secret never reaches the dashboard");
+    }
+
+    #[test]
+    fn an_audit_with_nothing_to_score_is_not_recorded() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-tui-unscored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let before = [result("firewall", Status::Fail, 20)];
+        let previous = history::RunRecord::new("2026-11-01T09:00:00+03:00".into(), "macOS 26".into(), 50, &before);
+        history::append(&path, Vec::new(), previous).unwrap();
+
+        // Every check Unknown: no score, so nothing to compare or save.
+        let trend = record_audit(Some(&path), &[result("firewall", Status::Unknown, 20)], "macOS 26");
+        let unscored: Vec<u32> = history::load(&path)
+            .unwrap()
+            .iter()
+            .map(|record| record.score)
+            .collect();
+        // A scored run is still saved and compared.
+        let scored_trend = record_audit(Some(&path), &[result("firewall", Status::Pass, 20)], "macOS 26");
+        let scored: Vec<u32> = history::load(&path)
+            .unwrap()
+            .iter()
+            .map(|record| record.score)
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(trend, "not recorded: no check could be evaluated");
+        assert_eq!(unscored, [50], "the placeholder score must not reach the history");
+        assert!(scored_trend.starts_with("previous 50 (+50)"), "{scored_trend}");
+        assert_eq!(scored, [50, 100]);
+        assert_eq!(
+            record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26"),
+            "history unavailable (HOME is not set)"
+        );
     }
 
     #[test]
