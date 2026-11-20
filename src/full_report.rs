@@ -702,6 +702,9 @@ impl FullReport {
                 ),
             );
         }
+        if let Some(folders) = scan.skipped.folders_note() {
+            note(out, Tone::Unknown, &folders);
+        }
         out.push_str("<div class=\"list\">\n");
         if scan.findings.is_empty() {
             out.push_str("<p class=\"empty\">No secrets found.</p>\n");
@@ -1698,6 +1701,7 @@ mod tests {
         report.secrets = secrets::scan(&secrets::files_under(&project));
         report.secrets.files_skipped = 1;
         report.secrets.skipped.binary = 1;
+        report.secrets.skipped.unreadable_folders = 2;
         let html = report.to_html();
 
         assert!(
@@ -1710,6 +1714,7 @@ mod tests {
             "<dt>Also in</dt><dd class=\"mono\">~/my app/backup.env</dd>",
             "<pre>chmod 600 ~/&#39;my app/it&#39;\\&#39;&#39;s.env&#39;</pre>",
             "1 file was skipped, not scanned: 1 binary or not text",
+            "2 folders could not be opened, so the files in them were not scanned",
             "3 secrets · 4 places",
             "<dt>Repeated</dt><dd>2 times in this file</dd>",
             "<dt>File mode</dt><dd>600</dd>",

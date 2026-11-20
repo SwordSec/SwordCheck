@@ -544,6 +544,7 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
             ),
         ));
     }
+    headline.extend(scan.skipped.folders_note().map(|note| (Tone::Warn, note)));
     ResultView::new(Module::Secrets, headline, rows, "No secrets found.")
 }
 
@@ -1658,6 +1659,17 @@ mod tests {
         .unwrap();
         let mut scan = secrets::scan(&secrets::files_under(&dir));
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !secrets_view(&scan)
+                .headline
+                .iter()
+                .any(|(_, line)| line.contains("folder"))
+        );
+        scan.skipped.unreadable_folders = 1;
+        assert!(secrets_view(&scan).headline.contains(&(
+            Tone::Warn,
+            "1 folder could not be opened, so the files in it were not scanned".to_string()
+        )));
         scan.findings[0].git_unknown = true;
         scan.findings[0].others_can_read = false;
         let view = secrets_view(&scan);

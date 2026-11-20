@@ -159,9 +159,10 @@ it never touches the network.
   under 20 characters show only their length. Copies of the same key in
   different files are linked through `secret_id`, a running number that says
   nothing about the value.
-- **Skipped files:** files over 8 MB, binary files and unreadable files are
-  counted and reported, not dropped silently. PGP private key blocks are
-  reported without a claim about passphrase protection.
+- **Skipped files:** files over 8 MB, binary files, unreadable files and
+  folders that cannot be opened are counted and reported, not dropped
+  silently. PGP private key blocks are reported without a claim about
+  passphrase protection.
 - **Flags:** `TRACKED IN GIT` when the file is tracked by a git repository,
   `mode 644` when group / other users can read it.
 - **Exit code:** 1 if a secret sits in a git-tracked file; otherwise 3 if git
