@@ -5,7 +5,7 @@
 //! keep running after a restart. The scan here relies on simple heuristic
 //! rules; it is not a definitive verdict but a "take a look" warning.
 
-use super::{Check, Outcome, Severity};
+use super::{Check, Outcome, Severity, Status};
 use crate::npm::runs_substituted_download;
 use crate::runner::CommandRunner;
 use serde_json::Value;
@@ -43,8 +43,9 @@ impl Check for LaunchItems {
     }
 
     fn run(&self, runner: &dyn CommandRunner) -> Outcome {
-        let (plists, unreadable_dirs) = find_plists(&launch_dirs());
-        examine(runner, &plists, &unreadable_dirs)
+        let home = crate::home::dir();
+        let (plists, unreadable_dirs) = find_plists(&launch_dirs(home.as_deref()));
+        without_home(examine(runner, &plists, &unreadable_dirs), home.is_none())
     }
 }
 
@@ -182,15 +183,29 @@ fn extract(runner: &dyn CommandRunner, key: &str, format: &str, path: &str) -> R
     }
 }
 
-/// The directories to scan: the system-wide ones and those of the current user.
-fn launch_dirs() -> Vec<PathBuf> {
+/// Without a home directory, the user's own launch agents (the usual place
+/// for malware that does not ask for a password) were not examined: a
+/// finding still stands, but "nothing suspicious" is no verdict.
+fn without_home(mut outcome: Outcome, missing: bool) -> Outcome {
+    let note = format!("~/Library/LaunchAgents was not examined: {}.", crate::home::MISSING);
+    match (missing, outcome.status) {
+        (false, _) => outcome,
+        (true, Status::Pass) => Outcome::unknown(format!("{} {note}", outcome.detail)),
+        (true, _) => {
+            outcome.detail.push_str(&format!(" {note}"));
+            outcome
+        }
+    }
+}
+
+/// The directories to scan: the system-wide ones and those of the current
+/// user, when there is a home directory.
+fn launch_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = vec![
         PathBuf::from("/Library/LaunchAgents"),
         PathBuf::from("/Library/LaunchDaemons"),
     ];
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(Path::new(&home).join("Library/LaunchAgents"));
-    }
+    dirs.extend(home.map(|home| home.join("Library/LaunchAgents")));
     dirs
 }
 
@@ -541,5 +556,23 @@ mod tests {
             .collect();
         assert_eq!(names, ["a.plist", "b.plist"]);
         assert_eq!(unreadable, [not_a_dir], "a missing directory is not an error");
+    }
+
+    #[test]
+    fn without_a_home_folder_nothing_suspicious_is_no_verdict() {
+        let note = "~/Library/LaunchAgents was not examined: HOME is not set to an absolute path.";
+        let pass = || Outcome::pass("3 items examined, none suspicious.");
+        assert_eq!(without_home(pass(), false).status, Status::Pass);
+        let unknown = without_home(pass(), true);
+        assert_eq!(unknown.status, Status::Unknown);
+        assert_eq!(unknown.detail, format!("3 items examined, none suspicious. {note}"));
+        // A finding in the directories that were examined still stands.
+        let warn = without_home(Outcome::warn("Suspicious items: x.plist.", "Review."), true);
+        assert_eq!(warn.status, Status::Warn);
+        assert_eq!(warn.detail, format!("Suspicious items: x.plist. {note}"));
+
+        assert_eq!(launch_dirs(None).len(), 2, "only the system-wide directories");
+        let user = launch_dirs(Some(Path::new("/Users/a")));
+        assert_eq!(user.last().unwrap(), Path::new("/Users/a/Library/LaunchAgents"));
     }
 }

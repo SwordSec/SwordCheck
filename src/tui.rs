@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
@@ -210,8 +210,7 @@ fn move_selection(list: &mut ListState, len: usize, delta: isize) {
 }
 
 fn short_path(path: &Path) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    secrets::display_path(path, home.as_deref())
+    secrets::display_path(path, crate::home::dir().as_deref())
 }
 
 fn vulns_view(scan: &vulns::Scan) -> ResultView {
@@ -357,7 +356,7 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
         ));
     }
     headline.extend(scan.unmatched_note().map(|note| (Tone::Dim, note)));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::home::dir();
     headline.extend(scan.skipped_note(home.as_deref()).map(|note| (Tone::Warn, note)));
     headline.extend(scan.warnings.iter().map(|warning| (Tone::Warn, warning.clone())));
     ResultView::new(
@@ -655,6 +654,8 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
                 .then(|| record_audit(history::history_path().as_deref(), &results, &setup.os_version));
             Outcome::Audit(results, trend)
         }
+        // These scans search the home directory: without one, nothing is scanned.
+        Module::Vulns | Module::Npm | Module::Secrets if crate::home::dir().is_none() => no_home(module),
         Module::Vulns => {
             progress.stage("Looking for lockfiles in your projects");
             let paths = lockfiles::default_files();
@@ -690,6 +691,21 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             Outcome::View(secrets_view(&secrets::scan_with(&files, progress)))
         }
     }
+}
+
+/// A scan of the home directory when there is none: the view says that
+/// nothing was scanned instead of showing an empty, all-clear result.
+fn no_home(module: Module) -> Outcome {
+    let line = format!(
+        "Nothing was scanned: {}, so there is no home folder to search. Set HOME, or scan a folder from the command line.",
+        crate::home::MISSING
+    );
+    Outcome::View(ResultView::new(
+        module,
+        vec![(Tone::Warn, line)],
+        Vec::new(),
+        "Nothing was scanned.",
+    ))
 }
 
 /// Saves a dashboard audit to the history, like the command line does, and
@@ -1382,6 +1398,7 @@ mod tests {
     use crate::score::tests::result;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     fn app() -> App {
         App::new(Setup {
@@ -2049,6 +2066,48 @@ mod tests {
         let err = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{out}{err}");
         assert!(out.contains("1 passed"), "the child ran the test: {out}");
+    }
+
+    /// Without a home folder, the scans of it show that nothing was scanned
+    /// instead of an empty, green view. Runs in a child process with HOME
+    /// removed, like the test above.
+    #[test]
+    fn without_a_home_folder_the_home_scans_say_nothing_was_scanned() {
+        if std::env::var_os("SWORDCHECK_WORKER_TEST").is_some() {
+            let setup = Setup {
+                save_history: false,
+                check_ids: Vec::new(),
+                config: Config::default(),
+                os_version: "macOS 26".into(),
+            };
+            let (progress, _events) = Progress::channel();
+            let said = |view: &ResultView| {
+                view.rows.is_empty()
+                    && matches!(view.headline.as_slice(), [(Tone::Warn, line)]
+                        if line.starts_with("Nothing was scanned: HOME is not set to an absolute path"))
+            };
+            for module in [Module::Vulns, Module::Npm, Module::Secrets] {
+                let outcome = work(module, false, &setup, &progress);
+                assert!(matches!(&outcome, Outcome::View(view) if said(view)));
+            }
+            return;
+        }
+        for home in ["", "relative"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tui::tests::without_a_home_folder_the_home_scans_say_nothing_was_scanned",
+                    "--nocapture",
+                ])
+                .env("SWORDCHECK_WORKER_TEST", "1")
+                .env("HOME", home)
+                .output()
+                .unwrap();
+            let out = String::from_utf8_lossy(&output.stdout);
+            let err = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{out}{err}");
+            assert!(out.contains("1 passed"), "the child ran the test: {out}");
+        }
     }
 
     /// The npm worker with online lookups on, through a `curl` that times

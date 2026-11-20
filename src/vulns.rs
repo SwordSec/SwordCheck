@@ -26,7 +26,7 @@ use crate::runner::CommandRunner;
 use colored::Colorize;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -292,26 +292,39 @@ impl Scan {
 /// that cannot be read are returned apart, so the scan can say so.
 pub fn read_lockfiles(paths: &[PathBuf], progress: &Progress) -> (Vec<Lockfile>, Vec<Skipped>) {
     progress.stage(format!("Reading {} lockfiles", paths.len()));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::home::dir();
     let mut lockfiles = Vec::new();
     let mut skipped = Vec::new();
-    for (index, path) in paths.iter().enumerate() {
-        match lockfiles::parse_file(path) {
-            Ok(Some(lockfile)) if !lockfile.packages.is_empty() => {
-                progress.note(format!(
-                    "{} ({} packages)",
-                    crate::secrets::display_path(path, home.as_deref()),
-                    lockfile.packages.len()
-                ));
-                lockfiles.push(lockfile);
+    // Requirements files pulled in with `-r` are read after the files found,
+    // and every file once, however many ways it is reached.
+    let mut queue: VecDeque<(PathBuf, bool)> = paths.iter().map(|path| (path.clone(), false)).collect();
+    let mut seen = HashSet::new();
+    let mut done = 0;
+    while let Some((path, included)) = queue.pop_front() {
+        done += 1;
+        if seen.insert(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())) {
+            let parsed = if included {
+                lockfiles::parse_included(&path).map(Some)
+            } else {
+                lockfiles::parse_file(&path)
+            };
+            match parsed {
+                Ok(Some(lockfile)) => {
+                    queue.extend(lockfile.includes.iter().map(|include| (include.clone(), true)));
+                    if !lockfile.packages.is_empty() {
+                        progress.note(format!(
+                            "{} ({} packages)",
+                            crate::secrets::display_path(&path, home.as_deref()),
+                            lockfile.packages.len()
+                        ));
+                        lockfiles.push(lockfile);
+                    }
+                }
+                Ok(None) => {}
+                Err(reason) => skipped.push(Skipped { path, reason }),
             }
-            Ok(_) => {}
-            Err(reason) => skipped.push(Skipped {
-                path: path.clone(),
-                reason,
-            }),
         }
-        progress.step(index + 1, paths.len());
+        progress.step(done, done + queue.len());
     }
     (lockfiles, skipped)
 }
@@ -467,7 +480,7 @@ pub fn system_items(runner: &dyn CommandRunner) -> System {
 /// `~/Applications`.
 fn app_items(runner: &dyn CommandRunner) -> System {
     let mut dirs = vec![PathBuf::from("/Applications")];
-    dirs.extend(std::env::var_os("HOME").map(|home| Path::new(&home).join("Applications")));
+    dirs.extend(crate::home::dir().map(|home| home.join("Applications")));
     app_items_in(runner, &dirs)
 }
 
@@ -1600,7 +1613,7 @@ impl VulnReport {
         let mut out = String::new();
         let rule = "─".repeat(78).dimmed();
         let scan = &self.scan;
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::home::dir();
         let short = |path: &Path| crate::secrets::display_path(path, home.as_deref());
 
         let ecosystems: Vec<String> = scan
@@ -2495,10 +2508,62 @@ mod tests {
     }
 
     #[test]
+    fn requirements_pulled_in_with_r_are_read_once_each() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-vulns-includes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/requirements")).unwrap();
+        let write = |relative: &str, contents: &str| {
+            let path = dir.join(relative);
+            std::fs::write(&path, contents).unwrap();
+            path
+        };
+        // The cookiecutter-django layout, with a cycle and a missing include.
+        let top = write("app/requirements.txt", "-r requirements/production.txt\n");
+        let production = write(
+            "app/requirements/production.txt",
+            "-r base.txt\n-r missing.txt\ngunicorn==21.2.0\n",
+        );
+        let base = write("app/requirements/base.txt", "-r production.txt\ndjango==3.2.0\n");
+        let dev = write("app/requirements-dev.txt", "-r requirements.txt\npytest==8.0.0\n");
+        let notes = write("app/notes.txt", "flask==2.0.0\n");
+
+        let (read, skipped) = read_lockfiles(&[dev.clone(), top, notes], &Progress::none());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let found: Vec<(&PathBuf, Vec<&str>)> = read
+            .iter()
+            .map(|lockfile| {
+                (
+                    &lockfile.path,
+                    lockfile.packages.iter().map(|p| p.name.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (&dev, vec!["pytest"]),
+                (&production, vec!["gunicorn"]),
+                (&base, vec!["django"]),
+            ],
+            "each file once, the included ones too, under their own path"
+        );
+        assert_eq!(
+            skipped,
+            [Skipped {
+                path: dir.join("app/requirements/missing.txt"),
+                reason: "could not be read"
+            }],
+            "a missing include is named, never dropped"
+        );
+    }
+
+    #[test]
     fn offline_scan_reports_the_inventory_only() {
         let lockfile = |path: &str, packages: &[Package]| Lockfile {
             path: PathBuf::from(path),
             packages: packages.iter().cloned().collect(),
+            includes: Vec::new(),
         };
         let shared = package("shared", "1.0.0");
         let cargo = Package {

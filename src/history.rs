@@ -76,9 +76,7 @@ pub fn history_path() -> Option<PathBuf> {
 fn path_from(swordcheck_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let dir = match swordcheck_home.filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => Some(PathBuf::from(home?))
-            .filter(|home| home.is_absolute())?
-            .join(".swordcheck"),
+        None => crate::home::from(home)?.join(".swordcheck"),
     };
     Some(dir.join("history.json"))
 }

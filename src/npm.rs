@@ -646,7 +646,7 @@ pub(crate) fn runs_substituted_download(text: &str) -> bool {
 // ---- Finding the directories to scan ----
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::home::dir()
 }
 
 /// Says that npm's own global directory may not have been scanned because
@@ -661,6 +661,11 @@ pub fn unlocated_note(problem: &str) -> String {
 /// not answer. The fixed locations are still returned then; a custom
 /// `prefix` would be missed.
 pub fn global_roots_checked(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option<String>) {
+    global_roots_in(runner, home().as_deref())
+}
+
+/// `global_roots_checked` with the home directory passed in.
+fn global_roots_in(runner: &dyn CommandRunner, home: Option<&Path>) -> (Vec<PathBuf>, Option<String>) {
     let mut problem = None;
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("/opt/homebrew/lib/node_modules"),
@@ -682,27 +687,35 @@ pub fn global_roots_checked(runner: &dyn CommandRunner) -> (Vec<PathBuf>, Option
         Err(err) => problem = Some(err),
     }
 
-    if let Some(home) = home() {
-        // `*` stands for a single directory level (e.g. the Node version).
-        const PATTERNS: [&str; 14] = [
-            ".npm-global/lib/node_modules",
-            ".npm/_npx/*/node_modules",
-            ".nvm/versions/node/*/lib/node_modules",
-            ".fnm/node-versions/*/installation/lib/node_modules",
-            ".local/share/fnm/node-versions/*/installation/lib/node_modules",
-            "Library/Application Support/fnm/node-versions/*/installation/lib/node_modules",
-            ".volta/tools/image/node/*/lib/node_modules",
-            ".volta/tools/image/packages/*/lib/node_modules",
-            ".asdf/installs/nodejs/*/lib/node_modules",
-            ".local/share/mise/installs/node/*/lib/node_modules",
-            "Library/pnpm/global/*/node_modules",
-            ".local/share/pnpm/global/*/node_modules",
-            ".bun/install/global/node_modules",
-            ".config/yarn/global/node_modules",
-        ];
-        for pattern in PATTERNS {
-            candidates.extend(expand(&home, pattern));
-        }
+    // Without a home directory, the version managers' and package managers'
+    // global directories in it cannot be found: say so, never guess.
+    let Some(home) = home else {
+        let missing = format!(
+            "the npm directories in the home folder were not located: {}",
+            crate::home::MISSING
+        );
+        let problem = problem.map_or(missing.clone(), |problem| format!("{problem}; {missing}"));
+        return (unique_dirs(candidates), Some(problem));
+    };
+    // `*` stands for a single directory level (e.g. the Node version).
+    const PATTERNS: [&str; 14] = [
+        ".npm-global/lib/node_modules",
+        ".npm/_npx/*/node_modules",
+        ".nvm/versions/node/*/lib/node_modules",
+        ".fnm/node-versions/*/installation/lib/node_modules",
+        ".local/share/fnm/node-versions/*/installation/lib/node_modules",
+        "Library/Application Support/fnm/node-versions/*/installation/lib/node_modules",
+        ".volta/tools/image/node/*/lib/node_modules",
+        ".volta/tools/image/packages/*/lib/node_modules",
+        ".asdf/installs/nodejs/*/lib/node_modules",
+        ".local/share/mise/installs/node/*/lib/node_modules",
+        "Library/pnpm/global/*/node_modules",
+        ".local/share/pnpm/global/*/node_modules",
+        ".bun/install/global/node_modules",
+        ".config/yarn/global/node_modules",
+    ];
+    for pattern in PATTERNS {
+        candidates.extend(expand(home, pattern));
     }
 
     (unique_dirs(candidates), problem)
@@ -1371,6 +1384,28 @@ mod tests {
 
         let fine = MockRunner::new().ok(ROOT, "/nonexistent/lib/node_modules");
         assert_eq!(global_roots_checked(&fine).1, None);
+    }
+
+    #[test]
+    fn without_a_home_folder_its_npm_directories_are_reported_as_not_located() {
+        use crate::runner::MockRunner;
+        const ROOT: &str = "npm root -g";
+        let temp = TempDir::new("no-home");
+        temp.package(".npm-global/lib/node_modules/chalk", pkg("chalk", "5.6.1"));
+        let missing = "the npm directories in the home folder were not located: HOME is not set to an absolute path";
+
+        let fine = MockRunner::new().ok(ROOT, "/nonexistent/lib/node_modules");
+        assert_eq!(global_roots_in(&fine, None).1.as_deref(), Some(missing));
+        let (roots, problem) = global_roots_in(&fine, Some(&temp.0));
+        assert_eq!(problem, None);
+        let global = temp.0.join(".npm-global/lib/node_modules").canonicalize().unwrap();
+        assert!(roots.contains(&global), "{roots:?}");
+
+        let failed = MockRunner::new().fail(ROOT, "npm ERR! broken");
+        assert_eq!(
+            global_roots_in(&failed, None).1,
+            Some(format!("`npm root -g` failed: npm ERR! broken; {missing}"))
+        );
     }
 
     #[test]
