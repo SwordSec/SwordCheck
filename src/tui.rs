@@ -361,7 +361,11 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
         .findings
         .iter()
         .map(|finding| {
-            let version = if finding.version.is_empty() { "?" } else { &finding.version };
+            let version = if finding.version.is_empty() {
+                "?"
+            } else {
+                &finding.version
+            };
             let title = format!("{}@{version}", finding.package);
             let mut detail = vec![
                 Detail::Heading(title.clone()),
@@ -373,14 +377,15 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             ];
             detail.extend(finding.paths.iter().map(|path| Detail::Dim(short_path(path))));
             detail.push(Detail::Blank);
-            detail.push(Detail::Text(if finding.kind.is_malware() {
-                "Remove the package or move to a clean version, reinstall node_modules, and rotate the npm / GitHub / cloud credentials on this machine.".into()
-            } else {
-                "Heuristic warning: read the install script and decide.".into()
-            }));
+            detail.push(Detail::Text(finding.kind.advice().into()));
+            let (tag, tone) = match finding.kind {
+                kind if kind.is_malware() => ("MALWARE", Tone::Bad),
+                npm::Kind::Unread => ("UNREAD", Tone::Warn),
+                _ => ("SCRIPT", Tone::Warn),
+            };
             Row {
-                tag: if finding.kind.is_malware() { "MALWARE" } else { "SCRIPT" }.into(),
-                tone: if finding.kind.is_malware() { Tone::Bad } else { Tone::Warn },
+                tag: tag.into(),
+                tone,
                 title,
                 detail,
             }
@@ -388,6 +393,7 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
         .collect();
 
     let malware = scan.malware().count();
+    let unread = scan.unread().count();
     let source = match &lookup {
         Some(Ok(())) => "built-in list + OSV.dev",
         Some(Err(_)) => "built-in list only",
@@ -406,10 +412,16 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
             if malware > 0 { Tone::Bad } else { Tone::Good },
             format!(
                 "{malware} malicious · {} suspicious install scripts",
-                scan.suspicious().count()
+                scan.suspicious().count() - unread
             ),
         ),
     ];
+    if unread > 0 {
+        headline.push((
+            Tone::Warn,
+            format!("{unread} packages not checked: their package.json is too large to read"),
+        ));
+    }
     if let Some(Err(err)) = lookup {
         headline.push((
             Tone::Warn,
@@ -1516,6 +1528,41 @@ mod tests {
         );
         assert!(npm_view(&scan, None).headline[0].1.contains("online lookups are off"));
         assert!(npm_view(&scan, Some(Ok(()))).headline[0].1.contains("OSV.dev"));
+    }
+
+    #[test]
+    fn unread_npm_packages_are_not_called_scripts() {
+        let finding = |kind, package: &str| npm::Finding {
+            kind,
+            package: package.into(),
+            version: String::new(),
+            reason: "reason".into(),
+            count: 1,
+            paths: Vec::new(),
+        };
+        let scan = npm::Scan {
+            findings: vec![
+                finding(npm::Kind::Unread, "event-stream"),
+                finding(npm::Kind::Script, "helper"),
+                finding(npm::Kind::Known, "chalk"),
+            ],
+            ..npm::Scan::default()
+        };
+        let mut scan = scan;
+        scan.findings[2].version = "5.6.1".into();
+        let view = npm_view(&scan, None);
+        let tags: Vec<&str> = view.rows.iter().map(|row| row.tag.as_str()).collect();
+        assert_eq!(tags, ["UNREAD", "SCRIPT", "MALWARE"]);
+        let titles: Vec<&str> = view.rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["event-stream@?", "helper@?", "chalk@5.6.1"]);
+        assert!(
+            view.rows[0]
+                .detail
+                .contains(&Detail::Text(npm::Kind::Unread.advice().into()))
+        );
+        let headline: Vec<&str> = view.headline.iter().map(|(_, text)| text.as_str()).collect();
+        assert!(headline[1].ends_with("1 suspicious install scripts"), "{headline:?}");
+        assert!(headline[2].starts_with("1 packages not checked"), "{headline:?}");
     }
 
     #[test]

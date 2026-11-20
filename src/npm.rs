@@ -193,12 +193,14 @@ pub enum Kind {
     IocFile,
     /// Suspicious install script (heuristic).
     Script,
+    /// A `package.json` too large to read, so the package was not checked.
+    Unread,
 }
 
 impl Kind {
-    /// Is this a definite finding (not a heuristic warning)?
+    /// Is this a definite finding (not a warning)?
     pub fn is_malware(self) -> bool {
-        self != Kind::Script
+        matches!(self, Kind::Known | Kind::Osv | Kind::IocFile)
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -207,6 +209,20 @@ impl Kind {
             Kind::Osv => "OSV RECORD",
             Kind::IocFile => "IOC FILE",
             Kind::Script => "SUSPICIOUS SCRIPT",
+            Kind::Unread => "NOT CHECKED",
+        }
+    }
+
+    /// What to do about a finding of this kind.
+    pub fn advice(self) -> &'static str {
+        match self {
+            Kind::Known | Kind::Osv | Kind::IocFile => {
+                "Remove the package or move to a clean version, reinstall node_modules, and rotate the npm, GitHub and cloud credentials on this Mac."
+            }
+            Kind::Script => "Heuristic warning: read the install script and decide.",
+            Kind::Unread => {
+                "Its package.json is too large to read, so the package was not checked against the malware list: look at it by hand."
+            }
         }
     }
 }
@@ -247,8 +263,14 @@ impl Scan {
         self.findings.iter().filter(|finding| finding.kind.is_malware())
     }
 
+    /// Warnings: suspicious install scripts and packages that were not checked.
     pub fn suspicious(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|finding| !finding.kind.is_malware())
+    }
+
+    /// Packages whose manifest could not be read, so they were not checked.
+    pub fn unread(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|finding| finding.kind == Kind::Unread)
     }
 
     /// Adds OSV results to the findings. Packages already caught by the
@@ -351,8 +373,19 @@ impl Scanner {
     /// Inspects a single package directory, then descends into its own
     /// `node_modules`.
     fn package(&mut self, dir: &Path, depth: usize) {
-        if let Some(manifest) = read_manifest(&dir.join("package.json")) {
-            self.inspect(dir, &manifest);
+        match read_manifest(&dir.join("package.json")) {
+            Ok(Some(manifest)) => self.inspect(dir, &manifest),
+            Ok(None) => {}
+            // npm installs a package whatever the size of its manifest, so a
+            // padded one must not hide the package: say it was not checked.
+            Err(size) => {
+                let reason = format!(
+                    "package.json is {} MB, over the {} MB this scan reads; check the package by hand",
+                    size.div_ceil(1024 * 1024),
+                    MAX_MANIFEST_BYTES / (1024 * 1024)
+                );
+                self.hit(Kind::Unread, &package_name(dir), "", reason, dir);
+            }
         }
         if depth < MAX_NESTING {
             self.node_modules(&dir.join("node_modules"), depth + 1);
@@ -420,15 +453,31 @@ fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
     dirs
 }
 
-fn read_manifest(path: &Path) -> Option<Value> {
-    let size = std::fs::metadata(path).ok()?.len();
-    if size > MAX_MANIFEST_BYTES {
-        return None;
+/// Reads a `package.json`: `Ok(None)` when there is none or it is not JSON,
+/// `Err(size)` when it is too large to read.
+fn read_manifest(path: &Path) -> Result<Option<Value>, u64> {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(metadata.len());
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
     // npm and Node strip a leading UTF-8 BOM, so such a package installs and
     // runs its scripts; it must not slip past the scan.
-    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok()
+    Ok(serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok())
+}
+
+/// The package name a directory under `node_modules` stands for
+/// (`@scope/name` for scoped packages).
+fn package_name(dir: &Path) -> String {
+    let name = |path: &Path| path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    match dir.parent().map(name) {
+        Some(scope) if scope.starts_with('@') => format!("{scope}/{}", name(dir)),
+        _ => name(dir),
+    }
 }
 
 /// Returns the description if the package and version match a known incident.
@@ -758,7 +807,8 @@ impl NpmReport {
         }
 
         let malware = scan.malware().count();
-        let suspicious = scan.suspicious().count();
+        let unread = scan.unread().count();
+        let suspicious = scan.suspicious().count() - unread;
         let _ = writeln!(out);
         let _ = writeln!(out, "{rule}");
         if malware > 0 {
@@ -779,6 +829,13 @@ impl NpmReport {
                     "{suspicious} suspicious install scripts: this is a heuristic warning, read the script and decide."
                 )
                 .yellow()
+            );
+        }
+        if unread > 0 {
+            let _ = writeln!(
+                out,
+                "{}",
+                format!("{unread} packages not checked: {}", Kind::Unread.advice()).yellow()
             );
         }
         if scan.roots.is_empty() {
@@ -957,6 +1014,47 @@ mod tests {
     }
 
     #[test]
+    fn oversized_manifest_is_reported_as_not_checked() {
+        // Padding a manifest past the size limit must not hide the package.
+        let temp = TempDir::new("oversized");
+        let padding = "a".repeat(MAX_MANIFEST_BYTES as usize + 1);
+        let padded = |name: &str| serde_json::json!({ "name": name, "version": "3.3.6", "description": padding });
+        temp.package("node_modules/event-stream", padded("event-stream"));
+        temp.package("node_modules/@scope/tool", padded("@scope/tool"));
+        temp.package("node_modules/left-pad", pkg("left-pad", "1.3.0"));
+        // No manifest, or one that is not a readable text file: still skipped
+        // quietly, as before (npm cannot install such a package).
+        std::fs::create_dir_all(temp.0.join("node_modules/no-manifest")).unwrap();
+        std::fs::create_dir_all(temp.0.join("node_modules/odd/package.json")).unwrap();
+        std::fs::create_dir_all(temp.0.join("node_modules/latin1")).unwrap();
+        std::fs::write(
+            temp.0.join("node_modules/latin1/package.json"),
+            b"{\"name\":\"caf\xe9\"}",
+        )
+        .unwrap();
+
+        let scan = scan(&[temp.0.join("node_modules")]);
+        assert_eq!(scan.packages, 1, "only left-pad could be read");
+        assert_eq!(scan.malware().count(), 0, "not checked is not malware");
+        let unread: Vec<(&str, &str)> = scan
+            .suspicious()
+            .map(|finding| (finding.package.as_str(), finding.version.as_str()))
+            .collect();
+        assert_eq!(unread, [("@scope/tool", ""), ("event-stream", "")]);
+        let finding = &scan.findings[0];
+        assert_eq!(finding.kind, Kind::Unread);
+        assert_eq!(
+            finding.reason,
+            "package.json is 3 MB, over the 2 MB this scan reads; check the package by hand"
+        );
+        assert!(
+            NpmReport::new(String::new(), false, scan)
+                .to_text()
+                .contains("[NOT CHECKED]")
+        );
+    }
+
+    #[test]
     fn manifest_with_a_bom_is_scanned() {
         // npm and Node accept a package.json that starts with a UTF-8 BOM.
         let temp = TempDir::new("bom");
@@ -1009,6 +1107,30 @@ mod tests {
         };
         let text = NpmReport::new(String::new(), false, scan).to_text();
         assert!(text.contains("no-version@?"), "{text}");
+    }
+
+    #[test]
+    fn text_report_counts_unread_packages_apart_from_scripts() {
+        let scan = Scan {
+            findings: vec![Finding {
+                kind: Kind::Unread,
+                package: "event-stream".into(),
+                version: String::new(),
+                reason: "package.json is 3 MB, over the 2 MB this scan reads; check the package by hand".into(),
+                count: 1,
+                paths: vec![PathBuf::from("/x/node_modules/event-stream")],
+            }],
+            ..Scan::default()
+        };
+        colored::control::set_override(false);
+        let text = NpmReport::new(String::new(), false, scan).to_text();
+        assert!(
+            text.contains("1 packages not checked: Its package.json is too large to read"),
+            "{text}"
+        );
+        assert!(!text.contains("suspicious install scripts"), "{text}");
+        assert!(Kind::Script.advice().starts_with("Heuristic warning"));
+        assert!(Kind::Known.advice().starts_with("Remove the package"));
     }
 
     #[test]

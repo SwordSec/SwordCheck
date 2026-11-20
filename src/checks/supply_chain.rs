@@ -56,11 +56,26 @@ fn outcome(scan: &npm::Scan) -> Outcome {
         );
     }
 
-    let suspicious: Vec<String> = scan.suspicious().map(describe).collect();
-    if !suspicious.is_empty() {
+    let scripts: Vec<String> = scan
+        .suspicious()
+        .filter(|finding| finding.kind != npm::Kind::Unread)
+        .map(describe)
+        .collect();
+    let unread: Vec<&str> = scan.unread().map(|finding| finding.package.as_str()).collect();
+    if !scripts.is_empty() || !unread.is_empty() {
+        let mut detail = Vec::new();
+        if !scripts.is_empty() {
+            detail.push(format!("Suspicious install scripts: {}.", scripts.join(", ")));
+        }
+        if !unread.is_empty() {
+            detail.push(format!(
+                "Not checked, package.json too large to read: {}.",
+                unread.join(", ")
+            ));
+        }
         return Outcome::warn(
-            format!("Suspicious install scripts: {}.", suspicious.join(", ")),
-            "Review the script; scan with `--npm` for details and project directories.",
+            detail.join(" "),
+            "Review the script or the package by hand; scan with `--npm` for details and project directories.",
         );
     }
 
@@ -120,5 +135,44 @@ mod tests {
             }),
         );
         assert_eq!(outcome(&scan).status, Status::Warn);
+    }
+
+    #[test]
+    fn unread_package_warns_with_its_own_wording() {
+        let finding = |kind, package: &str| Finding {
+            kind,
+            package: package.into(),
+            version: String::new(),
+            reason: "reason".into(),
+            count: 1,
+            paths: Vec::new(),
+        };
+        let unread = npm::Scan {
+            findings: vec![finding(npm::Kind::Unread, "event-stream")],
+            ..npm::Scan::default()
+        };
+        let outcome_unread = outcome(&unread);
+        assert_eq!(outcome_unread.status, Status::Warn);
+        assert_eq!(
+            outcome_unread.detail,
+            "Not checked, package.json too large to read: event-stream."
+        );
+
+        let both = npm::Scan {
+            findings: vec![
+                finding(npm::Kind::Script, "helper"),
+                finding(npm::Kind::Unread, "event-stream"),
+            ],
+            ..npm::Scan::default()
+        };
+        let detail = outcome(&both).detail;
+        assert!(
+            detail.starts_with("Suspicious install scripts: helper@ (reason)."),
+            "{detail}"
+        );
+        assert!(
+            detail.ends_with("Not checked, package.json too large to read: event-stream."),
+            "{detail}"
+        );
     }
 }
