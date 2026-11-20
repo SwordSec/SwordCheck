@@ -377,3 +377,101 @@ fn audit_keeps_going_when_the_history_is_unusable() {
         stderr(&output)
     );
 }
+
+#[test]
+fn a_closed_stdout_keeps_the_exit_code() {
+    // `swordcheck --list | head -1` once head has exited: a write to stdout
+    // fails, which must not turn into a panic and exit code 101.
+    let home = Home::new("stdout");
+    for args in [&["--list"][..], &["--history"][..]] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = home
+            .command(args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {}", stderr(&output));
+        assert!(!stderr(&output).contains("panicked"), "{args:?}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn notes_and_warnings_reach_stderr() {
+    // An audit.toml in the current directory is announced.
+    let home = Home::new("notes");
+    home.write("audit.toml", "[exceptions]\nsip = \"not under test\"\n");
+    let output = home
+        .command(&["--only", "sip", "--no-history", "--json"])
+        .current_dir(&home.0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("using ./audit.toml"), "{}", stderr(&output));
+
+    // A failed OSV query for npm says so, and the scan is incomplete.
+    let app = home.project("app", false);
+    let output = home
+        .command(&["--npm", "--online", "--npm-path", str(&app)])
+        .env("https_proxy", DEAD_PROXY)
+        .env("HTTPS_PROXY", DEAD_PROXY)
+        .env("ALL_PROXY", DEAD_PROXY)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(stderr(&output).contains("OSV query failed"), "{}", stderr(&output));
+}
+
+#[test]
+fn secrets_say_when_git_cannot_tell_whether_a_file_is_tracked() {
+    let home = Home::new("gitshim");
+    let app = home.path("app");
+    let secret = password(303);
+    home.write(
+        "app/.env",
+        &format!("DATABASE_URL=postgres://app:{secret}@db.prod.internal/app\n"),
+    );
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", ".env"]);
+    git(&app, &["commit", "-qm", "fixture"]);
+
+    // With a working git the leak is reported, and the run fails.
+    let output = home.run(&["--secrets", "--secrets-path", str(&app)]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(text.contains("TRACKED IN GIT"), "{text}");
+
+    // The git of a Mac without the Command Line Tools: an error, exit 1.
+    let shim = home.write(
+        "shim/git",
+        "#!/bin/sh\necho 'xcrun: error: invalid active developer path' >&2\nexit 1\n",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", str(&home.path("shim")));
+    for json in [false, true] {
+        let mut args = vec!["--secrets", "--secrets-path", str(&app)];
+        if json {
+            args.push("--json");
+        }
+        let output = home.command(&args).env("PATH", &path).output().unwrap();
+        let out = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(output.status.code(), Some(3), "unknown is not clean: {out}");
+        assert!(!out.contains(&secret), "the raw secret is never printed");
+        if json {
+            assert!(out.contains("\"git_unknown\": true"), "{out}");
+        } else {
+            assert!(out.contains("GIT STATUS UNKNOWN"), "{out}");
+            assert!(
+                out.contains("git could not tell whether the file is tracked: 1"),
+                "{out}"
+            );
+            assert!(!out.contains("TRACKED IN GIT"), "{out}");
+        }
+    }
+}

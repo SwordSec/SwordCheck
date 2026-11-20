@@ -123,7 +123,7 @@ means the advice points to the place in System Settings (or Recovery).
 | 0 | No failed check and the score is above the threshold |
 | 1 | At least one check failed, or the score is below `--min-score` |
 | 2 | Usage or configuration error |
-| 3 | `--npm` / `--vulns` / `--report` with `--online`: a lookup failed, so the scan is incomplete |
+| 3 | `--npm` / `--vulns` / `--report` with `--online`: a lookup failed, so the scan is incomplete; `--secrets` / `--report`: git could not tell whether a file with a secret is tracked |
 
 The scan modes use 1 for their own "found something" condition (described in
 each section) and 3 when an online lookup failed and nothing was found in the

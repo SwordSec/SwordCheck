@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -144,9 +144,7 @@ fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<C
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
-                // Kill it and reap it so no zombie is left behind.
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 return Err(timed_out());
             }
             Ok(None) => std::thread::sleep(POLL),
@@ -171,6 +169,42 @@ fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<C
         stderr: collect(stderr)?,
         success: status.success(),
     })
+}
+
+/// Kills a command that ran out of time, with every process it started that
+/// still runs, and reaps it so no zombie is left behind. Killing only the
+/// direct child would leave a wrapper's own children running after we gave
+/// up, holding the output pipes (and our reader threads) open. The child
+/// stays in our process group, so Ctrl+C still reaches all of them.
+fn kill_tree(child: &mut Child) {
+    let mut pids = vec![child.id().to_string()];
+    let mut next = 0;
+    while next < pids.len() {
+        let children: Vec<String> = Command::new("/usr/bin/pgrep")
+            .args(["-P", &pids[next]])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        pids.extend(children);
+        next += 1;
+    }
+    // Descendants first; the child itself goes through its handle, which reaps it.
+    if pids.len() > 1 {
+        let _ = Command::new("/bin/kill")
+            .arg("-KILL")
+            .args(&pids[1..])
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Reads a pipe to its end on a separate thread and sends the bytes back.
@@ -331,6 +365,34 @@ mod tests {
         let again = Instant::now();
         assert!(runner.run("/bin/sleep", &["30"]).is_err());
         assert!(again.elapsed() < Duration::from_millis(150));
+    }
+
+    #[test]
+    fn timeout_also_kills_the_commands_own_children() {
+        // A wrapper (sh) whose child would outlive it, holding the pipes.
+        let file = std::env::temp_dir().join(format!("swordcheck-runner-tree-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let script = format!(
+            "/bin/sh -c \"/bin/sleep 600 & echo \\$! >> '{0}'; wait\" & echo $! >> '{0}'; wait",
+            file.display()
+        );
+        let runner = SystemRunner::with_timeout(Duration::from_millis(1500));
+        assert!(runner.run("/bin/sh", &["-c", &script]).is_err());
+
+        let started = std::fs::read_to_string(&file).unwrap();
+        let _ = std::fs::remove_file(&file);
+        let alive: Vec<&str> = started
+            .split_whitespace()
+            .filter(|pid| {
+                Command::new("/bin/kill")
+                    .args(["-0", pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            })
+            .collect();
+        assert_eq!(started.split_whitespace().count(), 2, "{started}");
+        assert!(alive.is_empty(), "still running after the timeout: {alive:?}");
     }
 
     #[test]
