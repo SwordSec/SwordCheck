@@ -245,7 +245,11 @@ fn vulns_view(scan: &vulns::Scan) -> ResultView {
             detail.push(Detail::Blank);
             for vuln in &item.exploited {
                 detail.push(Detail::Text(format!("{}  {}", vuln.cve, vuln.name)));
-                detail.push(Detail::Dim(format!("added to CISA KEV on {}", vuln.date_added)));
+                let ransomware = if vuln.ransomware { ", used in ransomware" } else { "" };
+                detail.push(Detail::Dim(format!(
+                    "added to CISA KEV on {}{ransomware}",
+                    vuln.date_added
+                )));
             }
             ("KEV", Tone::Bad)
         };
@@ -1685,6 +1689,7 @@ mod tests {
                         cve: "CVE-2023-7024".into(),
                         name: "WebRTC".into(),
                         date_added: "2024-01-02".into(),
+                        ransomware: false,
                     }],
                 });
             }
@@ -1918,6 +1923,35 @@ mod tests {
             && text
                 == "1 lockfile could not be read, so the packages they pin were not checked: \
                         /nowhere/app/requirements.txt (over 64 MB)"));
+    }
+
+    #[test]
+    fn installed_products_say_when_a_kev_entry_is_used_in_ransomware() {
+        let vuln = |cve: &str, ransomware: bool| vulns::SystemVuln {
+            cve: cve.into(),
+            name: "Flaw".into(),
+            date_added: "2024-03-01".into(),
+            ransomware,
+        };
+        let scan = vulns::Scan {
+            online: true,
+            system: vec![vulns::SystemItem {
+                source: vulns::Source::App,
+                name: "Chrome".into(),
+                version: "1.0".into(),
+                cpe: "cpe:2.3:a:google:chrome:1.0".into(),
+                checked: true,
+                error: None,
+                exploited: vec![vuln("CVE-2024-2", true), vuln("CVE-2024-3", false)],
+            }],
+            ..vulns::Scan::default()
+        };
+        let view = vulns_view(&scan);
+        let detail = &view.rows[0].detail;
+        assert!(detail.contains(&Detail::Dim(
+            "added to CISA KEV on 2024-03-01, used in ransomware".into()
+        )));
+        assert!(detail.contains(&Detail::Dim("added to CISA KEV on 2024-03-01".into())));
     }
 
     /// The vulnerability worker reads HOME, so it runs in a child process of

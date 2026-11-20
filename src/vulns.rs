@@ -120,6 +120,8 @@ pub struct SystemVuln {
     pub cve: String,
     pub name: String,
     pub date_added: String,
+    /// Known to be used in ransomware campaigns.
+    pub ransomware: bool,
 }
 
 /// Where an installed product was found.
@@ -744,10 +746,8 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
 
     // 3. Prioritization data.
     progress.stage("Loading the CISA known-exploited catalog");
-    let kev = load_kev(&options.cache).unwrap_or_else(|err| {
-        warnings.push(format!("CISA KEV download failed: {err}"));
-        BTreeMap::new()
-    });
+    let (kev, kev_error) = load_kev(&options.cache);
+    warnings.extend(kev_error);
     progress.note(format!("{} known-exploited vulnerabilities in the catalog", kev.len()));
     let cves: BTreeSet<&str> = advisories
         .values()
@@ -783,11 +783,7 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
             severity: advisory.severity,
             malware: hit.id.starts_with("MAL-"),
             fixed: advisory.fixed_for(package),
-            kev: advisory
-                .cves
-                .iter()
-                .find_map(|cve| kev.get(cve.as_str()))
-                .map(|entry| entry.kev.clone()),
+            kev: kev_status(&advisory.cves, &kev),
             // An advisory may alias several CVEs; the riskiest one counts.
             epss: advisory
                 .cves
@@ -1324,25 +1320,50 @@ struct KevEntry {
     name: String,
 }
 
-/// Loads the KEV catalog, refreshing the cached copy once a day.
-fn load_kev(cache: &Path) -> Result<BTreeMap<String, KevEntry>, String> {
+/// Loads the KEV catalog, refreshing the cached copy once a day. Returns the
+/// catalog and, if the download failed, a warning: an older cached copy is
+/// still used, but it may miss recently added vulnerabilities, so the result
+/// must not read as complete.
+fn load_kev(cache: &Path) -> (BTreeMap<String, KevEntry>, Option<String>) {
     let path = cache.join("kev.json");
     // A fresh copy that no longer parses is downloaded again.
     if let Some(parsed) = read_fresh(&path).and_then(|text| parse_kev(&text).ok()) {
-        return Ok(parsed);
+        return (parsed, None);
     }
     let downloaded = net::get(KEV_URL, &[]).and_then(|text| parse_kev(&text).map(|parsed| (parsed, text)));
-    match downloaded {
+    let err = match downloaded {
         Ok((parsed, text)) => {
             store(&path, &text);
-            Ok(parsed)
+            return (parsed, None);
         }
-        // A stale catalog is better than none.
-        Err(err) => std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| parse_kev(&text).ok())
-            .ok_or(err),
+        Err(err) => err,
+    };
+    // A stale catalog is better than none, but it is not up to date.
+    match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| parse_kev(&text).ok())
+    {
+        Some(stale) => {
+            let since = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .map(|time| format!(" of {}", chrono::DateTime::<chrono::Utc>::from(time).format("%Y-%m-%d")))
+                .unwrap_or_default();
+            let warning = format!(
+                "CISA KEV download failed: {err}; used the cached catalog{since}, which may miss recently added vulnerabilities."
+            );
+            (stale, Some(warning))
+        }
+        None => (BTreeMap::new(), Some(format!("CISA KEV download failed: {err}"))),
     }
+}
+
+/// The KEV status of an advisory. Of several of its CVEs in the catalog, one
+/// used in ransomware counts, as when two databases' copies are merged.
+fn kev_status(cves: &[String], kev: &BTreeMap<String, KevEntry>) -> Option<Kev> {
+    cves.iter()
+        .filter_map(|cve| kev.get(cve.as_str()))
+        .min_by_key(|entry| !entry.kev.ransomware)
+        .map(|entry| entry.kev.clone())
 }
 
 fn parse_kev(text: &str) -> Result<BTreeMap<String, KevEntry>, String> {
@@ -1503,6 +1524,8 @@ fn parse_nvd(text: &str, kev: &BTreeMap<String, KevEntry>) -> Result<Vec<SystemV
                 date_added: field("cisaExploitAdd")
                     .or_else(|| known.map(|k| k.kev.date_added.clone()))
                     .unwrap_or_default(),
+                // The NVD does not say; the KEV catalog does.
+                ransomware: known.is_some_and(|k| k.kev.ransomware),
             })
         })
         .collect();
@@ -1644,11 +1667,12 @@ impl VulnReport {
                         .bold()
                 );
                 for vuln in item.exploited.iter().take(5) {
+                    let ransomware = if vuln.ransomware { ", used in ransomware" } else { "" };
                     let _ = writeln!(
                         out,
                         "      {} {}",
                         vuln.cve,
-                        format!("{} (added {})", vuln.name, vuln.date_added).dimmed()
+                        format!("{} (added {}{ransomware})", vuln.name, vuln.date_added).dimmed()
                     );
                 }
                 if item.exploited.len() > 5 {
@@ -2044,6 +2068,61 @@ mod tests {
     }
 
     #[test]
+    fn an_advisory_with_several_kev_cves_keeps_the_ransomware_flag() {
+        let kev = parse_kev(
+            r#"{"vulnerabilities": [
+                {"cveID": "CVE-2024-1", "dateAdded": "2024-02-01", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2024-2", "dateAdded": "2024-03-01", "knownRansomwareCampaignUse": "Known"}
+            ]}"#,
+        )
+        .unwrap();
+        let cves = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let status = kev_status(&cves(&["CVE-2024-1", "CVE-2024-2"]), &kev).unwrap();
+        assert!(
+            status.ransomware,
+            "the ransomware entry must not be lost to the first CVE"
+        );
+        assert_eq!(status.date_added, "2024-03-01");
+        // Without ransomware use, the first CVE in the catalog counts, as before.
+        let plain = kev_status(&cves(&["CVE-2024-0", "CVE-2024-1"]), &kev).unwrap();
+        assert_eq!((plain.ransomware, plain.date_added.as_str()), (false, "2024-02-01"));
+        assert_eq!(kev_status(&cves(&["CVE-2024-9"]), &kev), None);
+    }
+
+    #[test]
+    fn installed_products_say_when_a_kev_entry_is_used_in_ransomware() {
+        let kev = parse_kev(
+            r#"{"vulnerabilities": [{"cveID": "CVE-2024-2", "vulnerabilityName": "Ransomware flaw",
+                "dateAdded": "2024-03-01", "knownRansomwareCampaignUse": "Known"}]}"#,
+        )
+        .unwrap();
+        let text = r#"{"vulnerabilities": [{"cve": {"id": "CVE-2024-2"}},
+            {"cve": {"id": "CVE-2023-1", "cisaExploitAdd": "2023-01-01", "cisaVulnerabilityName": "Plain flaw"}}]}"#;
+        let exploited = parse_nvd(text, &kev).unwrap();
+        let flags: Vec<(&str, bool)> = exploited.iter().map(|v| (v.cve.as_str(), v.ransomware)).collect();
+        assert_eq!(flags, [("CVE-2024-2", true), ("CVE-2023-1", false)]);
+
+        let scan = Scan {
+            online: true,
+            system: vec![SystemItem {
+                exploited,
+                checked: true,
+                ..system_item(Source::App, "Browser", "1.0", "cpe".to_string())
+            }],
+            ..Scan::default()
+        };
+        colored::control::set_override(false);
+        let report = VulnReport::new("now".to_string(), scan);
+        let text = report.to_text();
+        assert!(
+            text.contains("CVE-2024-2 Ransomware flaw (added 2024-03-01, used in ransomware)"),
+            "{text}"
+        );
+        assert!(text.contains("CVE-2023-1 Plain flaw (added 2023-01-01)"), "{text}");
+        assert!(report.to_json().contains("\"ransomware\": true"));
+    }
+
+    #[test]
     fn nvd_response_lists_exploited_cves_newest_first() {
         let kev = parse_kev(r#"{"vulnerabilities": [{"cveID": "CVE-2023-2", "vulnerabilityName": "From catalog", "dateAdded": "2023-05-05"}]}"#).unwrap();
         let text = r#"{"totalResults": 2, "vulnerabilities": [
@@ -2056,7 +2135,8 @@ mod tests {
             SystemVuln {
                 cve: "CVE-2023-2".to_string(),
                 name: "From catalog".to_string(),
-                date_added: "2023-05-05".to_string()
+                date_added: "2023-05-05".to_string(),
+                ransomware: false,
             }
         );
         assert_eq!(exploited[1].cve, "CVE-2023-1");
@@ -2474,6 +2554,7 @@ mod tests {
                 cve: "CVE-2025-1".to_string(),
                 name: "Browser bug".to_string(),
                 date_added: "2025-01-01".to_string(),
+                ransomware: false,
             }],
             checked: true,
             ..system_item(Source::App, "Browser", "1.0", "cpe".to_string())

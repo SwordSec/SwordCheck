@@ -475,9 +475,10 @@ impl FullReport {
         for item in scan.system.iter().filter(|item| !item.exploited.is_empty()) {
             let mut body = String::from("<dl class=\"facts\">");
             for vuln in &item.exploited {
+                let ransomware = if vuln.ransomware { ", used in ransomware" } else { "" };
                 let _ = write!(
                     body,
-                    "<dt>{}</dt><dd>{}, in CISA KEV since {}</dd>",
+                    "<dt>{}</dt><dd>{}, in CISA KEV since {}{ransomware}</dd>",
                     escape(&vuln.cve),
                     escape(&vuln.name),
                     escape(&vuln.date_added)
@@ -1233,6 +1234,7 @@ mod tests {
             cve: cve.into(),
             name: format!("{cve} name"),
             date_added: "2024-01-02".into(),
+            ransomware: false,
         }
     }
 
@@ -1346,6 +1348,19 @@ mod tests {
             !html.contains("since 2026-11-13"),
             "no comparison against an unscorable run"
         );
+    }
+
+    #[test]
+    fn installed_products_say_when_a_kev_entry_is_used_in_ransomware() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.online = true;
+        report.vulns.online = true;
+        let mut ransomware = kev_vuln("CVE-2024-2");
+        ransomware.ransomware = true;
+        report.vulns.system = vec![system_item("Chrome", vec![ransomware, kev_vuln("CVE-2024-3")], None)];
+        let html = report.to_html();
+        assert!(html.contains("<dd>CVE-2024-2 name, in CISA KEV since 2024-01-02, used in ransomware</dd>"));
+        assert!(html.contains("<dd>CVE-2024-3 name, in CISA KEV since 2024-01-02</dd>"));
     }
 
     #[test]
