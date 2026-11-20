@@ -62,6 +62,7 @@ const DOCKER_AUTH: &str = "docker-auth";
 const KUBE_CLIENT_KEY: &str = "kube-client-key";
 const NETRC: &str = "netrc";
 const PGPASS: &str = "pgpass";
+const NPM_AUTH: &str = "npm-auth";
 
 /// Order matters: a piece of text is claimed by the first rule that matches it.
 const RULES: &[Rule] = &[
@@ -125,6 +126,15 @@ const RULES: &[Rule] = &[
         pattern: r"\bpassword\s+(\S{4,})",
         file_hint: Some("netrc"),
     },
+    // npm's `_auth` (optionally scoped, `//registry/:_auth`): base64 of
+    // `user:password`, so the whole value is the login. `_authToken` is a
+    // different setting, found by the generic rule.
+    Rule {
+        id: NPM_AUTH,
+        provider: "npm registry login",
+        pattern: r#"(?m)^[ \t]*(?://\S*?:)?_auth[ \t]*=[ \t]*["']?([A-Za-z0-9+/]{8,}={0,2})"#,
+        file_hint: Some("npmrc"),
+    },
     // `hostname:port:database:username:password`, one per line; `\:` and `\\`
     // are escapes, `#` starts a comment. Group 1 is the host, group 2 the user
     // name, group 3 the password.
@@ -148,8 +158,11 @@ const RULES: &[Rule] = &[
     ),
 ];
 
-/// Generic assignment: group 1 is the variable name, group 2 is the value.
-const GENERIC_PATTERN: &str = r#"(?i)\b([a-z0-9_.-]*(?:secret|token|passwd|password|api_?key|apikey|private_?key|access_?key)[a-z0-9_.-]*)["']?\s*[=:]\s*["']?([^\s"'`,;#]{8,})"#;
+/// Generic assignment: group 1 is the variable name; the value is group 2
+/// (double-quoted), 3 (single-quoted) or 4 (bare). Inside quotes `#`, `;`,
+/// `,` and backticks belong to the value, as they do in dotenv, shells, TOML
+/// and JSON; a quoted value with spaces is read like a bare one.
+const GENERIC_PATTERN: &str = r#"(?i)\b([a-z0-9_.-]*(?:secret|token|passwd|password|api_?key|apikey|private_?key|access_?key)[a-z0-9_.-]*)["']?\s*[=:]\s*(?:"([^"\s]{8,})"|'([^'\s]{8,})'|["']?([^\s"'`,;#]{8,}))"#;
 
 /// Extracts the name from the `NAME=` or `"name": "` fragment immediately left of a match.
 const NAME_PATTERN: &str = r#"([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[=:]\s*["']?$"#;
@@ -388,9 +401,13 @@ fn scan_text(file_name: &str, text: &str) -> Vec<Match> {
         return matches;
     }
     for captures in compiled.generic.captures_iter(text) {
-        let (Some(name), Some(value)) = (captures.get(1), captures.get(2)) else {
-            continue;
-        };
+        // Group 1 always matches; exactly one of the value groups does.
+        let name = captures.get(1).expect("generic name group");
+        let value = captures
+            .get(2)
+            .or(captures.get(3))
+            .or(captures.get(4))
+            .expect("one generic value group");
         if overlaps(&taken, value.start(), value.end()) || !looks_secret(name.as_str(), value.as_str()) {
             continue;
         }
@@ -803,7 +820,7 @@ fn mask(rule: &str, secret: &str) -> String {
     if len < MIN_REVEAL_LEN
         || matches!(
             rule,
-            GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC | PGPASS
+            GENERIC | URL_PASSWORD | DOCKER_AUTH | KUBE_CLIENT_KEY | NETRC | PGPASS | NPM_AUTH
         )
     {
         return hidden;
@@ -1189,7 +1206,8 @@ pub fn files_under(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Searches under `base` for files that may hold secrets. Hidden directories,
-/// dependency directories and symbolic links are skipped.
+/// dependency directories and links to directories are skipped; a candidate
+/// that links to a file is included.
 fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
     /// Deep enough to reach monorepo sub-packages when starting from the home directory.
     const MAX_DEPTH: usize = 9;
@@ -1206,14 +1224,17 @@ fn walk(base: &Path, skip_top: &[&str]) -> Vec<PathBuf> {
         );
 
         for entry in entries.flatten() {
-            // `file_type` does not follow links; symbolic links count as neither
-            // file nor directory and are skipped (to avoid loops and duplicates).
+            // `file_type` does not follow links. A link to a directory is not
+            // followed (no loops); a candidate name that links to a file is
+            // scanned, as `.env -> ../shared/app.env` is how many projects share
+            // one. `unique_files` resolves it, so a target scanned anyway is
+            // not scanned twice.
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if kind.is_file() {
+            if kind.is_file() || (kind.is_symlink() && entry.path().is_file()) {
                 if is_candidate(&name) {
                     found.push(entry.path());
                 }
@@ -2185,6 +2206,86 @@ mod tests {
         // A first URL that is not reported does not hide the next one.
         let line = format!("URLS=postgres://app:Hk7pQ2wZx9@db.example.com/app,{second}");
         assert_eq!(url_secrets(&line), ["Lp4wR8nTqV"], "{line}");
+    }
+
+    #[test]
+    fn quoted_values_keep_comment_and_separator_characters() {
+        // Inside quotes `#`, `;`, `,` and backticks are part of the value.
+        let values: Vec<String> = ["#", ";", ",", "`"]
+            .iter()
+            .enumerate()
+            .map(|(seed, mark)| {
+                format!(
+                    "{}{mark}{}",
+                    random(ALNUM, 7, 40 + seed as u64),
+                    random(ALNUM, 8, 50 + seed as u64)
+                )
+            })
+            .collect();
+        let single = format!("{}#{}", random(ALNUM, 7, 60), random(ALNUM, 8, 61));
+        let bare = random(ALNUM, 16, 62);
+        let text = format!(
+            "DB_PASSWORD=\"{}\"\nSMTP_SECRET=\"{}\"\nLIST_TOKEN=\"{}\"\nTICK_API_KEY=\"{}\"\n\
+             ALT_PASSWORD='{single}'\nTOKEN_DESCRIPTION=\"Token used for the nightly CI deploys\"\n\
+             BARE_API_KEY={bare} # rotated monthly\n",
+            values[0], values[1], values[2], values[3]
+        );
+        let found = scan_text(".env", &text);
+        let secrets: Vec<&str> = found.iter().map(|found| found.secret.as_str()).collect();
+        let mut expected: Vec<&str> = values.iter().map(String::as_str).collect();
+        expected.extend([single.as_str(), bare.as_str()]);
+        assert_eq!(secrets, expected, "a quoted sentence is not a secret");
+
+        // JSON and TOML values too.
+        let json = format!("{{\"service\": {{\"api_key\": \"{}\"}}}}", values[0]);
+        assert_eq!(scan_text("secrets.json", &json)[0].secret, values[0]);
+        let toml = format!("password = \"{}\"\n", values[1]);
+        assert_eq!(scan_text("secrets.toml", &toml)[0].secret, values[1]);
+    }
+
+    #[test]
+    fn a_candidate_that_links_to_a_file_is_scanned() {
+        let dir = TempDir::new("links");
+        let outside = dir.write(".vault/app-prod", "K=v\n");
+        let shared = dir.write("proj/.env.shared", "K=v\n");
+        dir.write(".vault/dir/.env", "K=v\n");
+        let notes = dir.write(".vault/notes", "K=v\n");
+        let link =
+            |target: &str, name: &str| std::os::unix::fs::symlink(target, dir.0.join("proj").join(name)).unwrap();
+        link("../.vault/app-prod", ".env");
+        link(".env.shared", ".env.alias");
+        link("../.vault/dir", "linked-dir");
+        link("loop-b.env", "loop-a.env");
+        link("loop-a.env", "loop-b.env");
+        link("missing.env", "dangling.env");
+        link("../.vault/notes", "notes.txt");
+
+        let files = files_under(&dir.0.join("proj"));
+        // Resolved to the real files, each once; links to directories,
+        // loops, dangling links and non-candidate names are left out.
+        let mut expected = vec![outside, shared];
+        expected.sort();
+        assert_eq!(files, expected);
+        assert!(!files.contains(&notes));
+    }
+
+    #[test]
+    fn npm_auth_is_a_login() {
+        let login = |user: &str, seed| {
+            let encoded = random(&format!("{ALNUM}+/"), 28, seed);
+            format!("{user}{encoded}=")
+        };
+        let (plain, scoped, quoted) = (login("ZGVw", 70), login("Y2k6", 71), login("b3Bz", 72));
+        let text = format!(
+            "_auth={plain}\n//npm.corp.example/:_auth = {scoped}\n//other.example/:_auth=\"{quoted}\"\n\
+             _auth=${{NPM_AUTH}}\n"
+        );
+        let found = scan_text(".npmrc", &text);
+        let secrets: Vec<&str> = found.iter().map(|found| found.secret.as_str()).collect();
+        assert_eq!(secrets, [plain.as_str(), scoped.as_str(), quoted.as_str()]);
+        assert!(found.iter().all(|found| found.rule == NPM_AUTH));
+        assert_eq!(mask(NPM_AUTH, &plain), format!("•••• ({} chars)", plain.len()));
+        assert!(rules_hit(".env", &text).is_empty(), "only in .npmrc files");
     }
 
     #[test]
