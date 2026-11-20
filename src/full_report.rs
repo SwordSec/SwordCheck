@@ -84,6 +84,9 @@ impl FullReport {
         if !self.vulns.warnings.is_empty() {
             gaps.push("a vulnerability lookup failed");
         }
+        if !self.vulns.skipped.is_empty() {
+            gaps.push("a lockfile could not be read");
+        }
         if matches!(self.npm_lookup, Some(Err(_))) {
             gaps.push("the OSV lookup for npm packages failed");
         }
@@ -168,9 +171,9 @@ impl FullReport {
                     .iter()
                     .filter(|item| !item.exploited.is_empty())
                     .count();
-            // A failed lookup may hide findings: that is never a clean 0.
-            let incomplete = !self.vulns.warnings.is_empty();
-            match (self.vulns.exploited(), count, incomplete) {
+            // A failed lookup or an unread lockfile may hide findings: that is
+            // never a clean 0.
+            match (self.vulns.exploited(), count, self.vulns.incomplete()) {
                 (1.., _, _) => (Tone::Crit, count.to_string()),
                 (0, 1.., _) => (Tone::Warn, count.to_string()),
                 (0, 0, true) => (Tone::Warn, "incomplete".to_string()),
@@ -458,6 +461,9 @@ impl FullReport {
                  Run with --online to check them.",
             );
         }
+        if let Some(skipped) = scan.skipped_note(self.home.as_deref()) {
+            note(out, Tone::Warn, &skipped);
+        }
         for warning in &scan.warnings {
             note(out, Tone::Warn, warning);
         }
@@ -522,11 +528,11 @@ impl FullReport {
 
         out.push_str("<div class=\"list\">\n");
         if rows.is_empty() {
-            let empty = match (self.online, scan.warnings.is_empty()) {
+            let empty = match (self.online, scan.incomplete()) {
                 (false, _) => "Nothing was looked up.",
-                (true, true) => "No known vulnerability affects the scanned versions.",
-                (true, false) => {
-                    "Nothing found in what could be looked up; the failed lookups above may hide findings."
+                (true, false) => "No known vulnerability affects the scanned versions.",
+                (true, true) => {
+                    "Nothing found in what could be checked; what the notes above say was not checked may hide findings."
                 }
             };
             let _ = writeln!(out, "<p class=\"empty\">{empty}</p>");
@@ -1720,6 +1726,29 @@ mod tests {
     }
 
     #[test]
+    fn unread_lockfiles_never_read_as_all_clear() {
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.online = true;
+        report.vulns.online = true;
+        report.vulns.skipped = vec![vulns::Skipped {
+            path: PathBuf::from("/Users/alice/app/package-lock.json"),
+            reason: "permission denied",
+        }];
+        let html = report.to_html();
+        assert!(report.incomplete());
+        for text in [
+            "1 lockfile could not be read, so the packages they pin were not checked: \
+             ~/app/package-lock.json (permission denied)",
+            "<a href=\"#vulns\">Vulnerabilities <b class=\"warn\">incomplete</b>",
+            "what the notes above say was not checked may hide findings",
+            "this list may be incomplete: a lockfile could not be read.",
+        ] {
+            assert!(html.contains(text), "{text}");
+        }
+        assert!(!html.contains("No known vulnerability affects the scanned versions."));
+    }
+
+    #[test]
     fn failed_lookups_never_read_as_all_clear() {
         let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
         report.online = true;
@@ -1731,7 +1760,7 @@ mod tests {
             "<a href=\"#vulns\">Vulnerabilities <b class=\"warn\">incomplete</b>",
             "<a href=\"#npm\">npm <b class=\"warn\">incomplete</b>",
             "this list may be incomplete: a vulnerability lookup failed; the OSV lookup for npm packages failed.",
-            "the failed lookups above may hide findings",
+            "what the notes above say was not checked may hide findings",
             "packages known only to OSV.dev were not checked",
         ] {
             assert!(html.contains(text), "{text}");

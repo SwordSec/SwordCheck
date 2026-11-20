@@ -46,19 +46,29 @@ pub struct Lockfile {
 /// Lockfiles larger than this are not read.
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Reads and parses a lockfile. Returns `None` if the file name is not a
-/// known lockfile or the file cannot be read.
-pub fn parse_file(path: &Path) -> Option<Lockfile> {
-    let name = path.file_name()?.to_str()?;
-    let parser = parser_for(name)?;
-    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
-        return None;
+/// Reads and parses a lockfile. `Ok(None)` if the file name is not a known
+/// lockfile; `Err(reason)` if it is one but cannot be used, so the caller can
+/// say that its packages were not checked.
+pub fn parse_file(path: &Path) -> Result<Option<Lockfile>, &'static str> {
+    let Some(parser) = path.file_name().and_then(|name| name.to_str()).and_then(parser_for) else {
+        return Ok(None);
+    };
+    if std::fs::metadata(path).map_err(unreadable)?.len() > MAX_BYTES {
+        return Err("over 64 MB");
     }
-    let text = decode(std::fs::read(path).ok()?)?;
-    Some(Lockfile {
+    let text = decode(std::fs::read(path).map_err(unreadable)?).ok_or("not UTF-8 or UTF-16 text")?;
+    Ok(Some(Lockfile {
         path: path.to_path_buf(),
         packages: parser(&text).into_iter().collect(),
-    })
+    }))
+}
+
+/// Why a lockfile could not be read, in words for the report.
+fn unreadable(err: std::io::Error) -> &'static str {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        _ => "could not be read",
+    }
 }
 
 /// Decodes a lockfile. Windows editors and PowerShell's `pip freeze >` save
@@ -1457,7 +1467,63 @@ mod tests {
         std::fs::write(&path, "\u{feff}requests==2.19.0\n").unwrap();
         let lockfile = parse_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
-        let packages: Vec<Package> = lockfile.expect("parsed").packages.into_iter().collect();
+        let packages: Vec<Package> = lockfile
+            .expect("readable")
+            .expect("a lockfile")
+            .packages
+            .into_iter()
+            .collect();
         assert_eq!(names(&packages), ["PyPI:requests@2.19.0"]);
+    }
+
+    #[test]
+    fn parse_file_says_why_a_lockfile_could_not_be_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("swordcheck-lockfiles-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder/package-lock.json")).unwrap();
+        let file = |name: &str, contents: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        };
+        let locked = file("Gemfile.lock", b"GEM\n");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let big = file("requirements.txt", b"");
+        std::fs::File::options()
+            .write(true)
+            .open(&big)
+            .unwrap()
+            .set_len(MAX_BYTES + 1)
+            .unwrap();
+        let latin1 = file("poetry.lock", b"# caf\xe9\n");
+        let notes = file("notes.txt", b"not a lockfile");
+
+        let reason = |path: &Path| parse_file(path).err();
+        let results = [
+            reason(&locked),
+            reason(&big),
+            reason(&latin1),
+            reason(&dir.join("folder/package-lock.json")),
+            reason(&dir.join("missing/yarn.lock")),
+        ];
+        let not_a_lockfile = parse_file(&notes);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            results,
+            [
+                Some("permission denied"),
+                Some("over 64 MB"),
+                Some("not UTF-8 or UTF-16 text"),
+                Some("could not be read"),
+                Some("could not be read"),
+            ]
+        );
+        assert!(
+            matches!(not_a_lockfile, Ok(None)),
+            "an unknown file name is not a lockfile"
+        );
     }
 }
