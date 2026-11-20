@@ -204,7 +204,7 @@ fn report_with_failed_online_lookups_is_incomplete() {
     for text in [
         "Online lookups on",
         "OSV lookup failed",
-        "The OSV lookup failed, so only the built-in list was checked",
+        "The OSV lookup failed, so the packages it did not answer for were checked against the built-in list only",
         "0 apps and formulae",
     ] {
         assert!(html.contains(text), "{text}");
@@ -690,5 +690,76 @@ fn online_scan_joins_the_kev_catalog_and_says_when_it_is_stale() {
     assert!(
         warning.ends_with(", which may miss recently added vulnerabilities."),
         "{warning}"
+    );
+}
+
+/// A `curl` that answers OSV batch request N from `$FAKE/batchN.json` and
+/// times out when that file is missing.
+const NUMBERED_CURL: &str = r#"#!/bin/sh
+cat > /dev/null
+n=$(($(cat "$FAKE/count" 2>/dev/null || echo 0) + 1))
+echo "$n" > "$FAKE/count"
+[ -f "$FAKE/batch$n.json" ] && cat "$FAKE/batch$n.json" && exit 0
+echo "curl: (28) Operation timed out" >&2
+exit 28
+"#;
+
+#[test]
+fn a_failed_osv_request_keeps_the_malware_found_before_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("osv-partial");
+    // 1001 packages take two OSV requests; the malicious one is in the first.
+    for name in std::iter::once("aaa-evil".to_string()).chain((0..1000).map(|index| format!("pkg-{index:04}"))) {
+        home.write(
+            &format!("app/node_modules/{name}/package.json"),
+            &format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        );
+    }
+    let shim = home.write("shim/curl", NUMBERED_CURL);
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut first = vec![serde_json::json!({}); 1000];
+    first[0] = serde_json::json!({"vulns": [{"id": "MAL-2025-1", "modified": "2025-01-01T00:00:00Z"}]});
+    home.write("fake/batch1.json", &serde_json::json!({ "results": first }).to_string());
+    home.write("fake/batch2.json", r#"{"results": [{}]}"#);
+    let scan = || {
+        let _ = std::fs::remove_file(home.path("fake/count"));
+        let output = home
+            .command(&["--npm", "--online", "--json", "--npm-path", str(&home.path("app"))])
+            .env("PATH", format!("{}:/usr/bin:/bin", str(&home.path("shim"))))
+            .env("FAKE", home.path("fake"))
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("a JSON report");
+        let malware: Vec<String> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["reason"].as_str().unwrap().contains("MAL-2025-1"))
+            .map(|finding| finding["package"].as_str().unwrap().to_string())
+            .collect();
+        (output.status.code(), report["online"].clone(), malware, stderr(&output))
+    };
+
+    // Both requests answered.
+    let (code, online, malware, err) = scan();
+    assert_eq!(
+        (code, online, malware),
+        (Some(1), serde_json::json!(true), vec!["aaa-evil".to_string()])
+    );
+    assert!(!err.contains("OSV"), "{err}");
+
+    // The second request times out: the record from the first is still reported.
+    std::fs::remove_file(home.path("fake/batch2.json")).unwrap();
+    let (code, online, malware, err) = scan();
+    assert_eq!(
+        (code, online, malware),
+        (Some(1), serde_json::json!(false), vec!["aaa-evil".to_string()])
+    );
+    assert!(
+        err.contains(
+            "OSV query failed: curl: (28) Operation timed out. \
+             The packages it did not answer for were checked against the built-in list only."
+        ),
+        "{err}"
     );
 }

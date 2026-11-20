@@ -719,10 +719,9 @@ pub fn scan(lockfiles: &[Lockfile], system: System, options: &Online) -> Scan {
 
     // 1. Which advisories affect which package?
     let progress = &options.progress;
-    let hits = osv_query(&packages, progress).unwrap_or_else(|err| {
-        warnings.push(format!("OSV lookup failed: {err}"));
-        Vec::new()
-    });
+    // A failed request still leaves the advisories found before it.
+    let (hits, osv_error) = osv_query(&packages, progress);
+    warnings.extend(osv_error.map(|err| format!("OSV lookup failed: {err}")));
 
     // The dashboard cancels by dropping its end of the progress channel.
     // Nothing is reported then, so stop before the next round of requests.
@@ -940,7 +939,9 @@ struct OsvHit {
     modified: String,
 }
 
-fn osv_query(packages: &[&Package], progress: &Progress) -> Result<Vec<OsvHit>, String> {
+/// The advisories found and, if a request failed, why; what was found before
+/// the failure is kept.
+fn osv_query(packages: &[&Package], progress: &Progress) -> (Vec<OsvHit>, Option<String>) {
     progress.stage(format!("Asking OSV.dev about {} packages", packages.len()));
     let queries: Vec<osv::Query> = packages
         .iter()
@@ -950,8 +951,8 @@ fn osv_query(packages: &[&Package], progress: &Progress) -> Result<Vec<OsvHit>, 
             version: &p.version,
         })
         .collect();
-    let results = osv::query(&queries, |done, total| progress.step(done, total))?;
-    Ok(flatten_hits(results))
+    let (results, error) = osv::query(&queries, |done, total| progress.step(done, total));
+    (flatten_hits(results), error)
 }
 
 fn flatten_hits(results: Vec<Vec<osv::Vuln>>) -> Vec<OsvHit> {

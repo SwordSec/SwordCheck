@@ -359,9 +359,7 @@ fn run_report(
     vulns.skipped = skipped;
 
     let mut npm = npm::scan_with(&npm_roots, &progress);
-    let npm_lookup = cli
-        .online
-        .then(|| npm::osv_lookup_with(&npm.installed, &progress).map(|hits| npm.add_osv(hits)));
+    let npm_lookup = cli.online.then(|| npm.lookup_osv(&progress));
 
     let secrets = secrets::scan_with(&secret_files, &progress);
 
@@ -455,15 +453,13 @@ fn run_npm(cli: &Cli) -> Result<ExitCode, String> {
     let mut online = false;
     let mut incomplete = false;
     if cli.online {
-        match npm::osv_lookup(&scan.installed) {
-            Ok(hits) => {
-                scan.add_osv(hits);
-                online = true;
-            }
+        // Records found before a failed request are kept.
+        match scan.lookup_osv(&progress::Progress::none()) {
+            Ok(()) => online = true,
             Err(err) => {
                 incomplete = true;
                 note(format_args!(
-                    "{} OSV query failed: {err}. Only the built-in list was checked.",
+                    "{} OSV query failed: {err}. The packages it did not answer for were checked against the built-in list only.",
                     "Warning:".yellow()
                 ));
             }

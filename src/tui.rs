@@ -410,7 +410,7 @@ fn npm_view(scan: &npm::Scan, lookup: Option<Result<(), String>>) -> ResultView 
     let unread = scan.unread().count();
     let source = match &lookup {
         Some(Ok(())) => "built-in list + OSV.dev",
-        Some(Err(_)) => "built-in list only",
+        Some(Err(_)) => "built-in list + OSV.dev (incomplete)",
         None => "built-in list only (online lookups are off)",
     };
     let mut headline = vec![
@@ -675,7 +675,7 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             progress.stage("Looking for node_modules directories");
             let roots = npm::all_roots(&runner);
             let mut scan = npm::scan_with(&roots, progress);
-            let lookup = online.then(|| npm::osv_lookup_with(&scan.installed, progress).map(|hits| scan.add_osv(hits)));
+            let lookup = online.then(|| scan.lookup_osv(progress));
             Outcome::View(npm_view(&scan, lookup))
         }
         Module::Secrets => {
@@ -1638,7 +1638,7 @@ mod tests {
         let scan = npm::scan(&[]);
         let failed = npm_view(&scan, Some(Err("offline".into())));
         let text: Vec<&str> = failed.headline.iter().map(|(_, text)| text.as_str()).collect();
-        assert!(text[0].ends_with("built-in list only"), "{text:?}");
+        assert!(text[0].ends_with("built-in list + OSV.dev (incomplete)"), "{text:?}");
         assert!(
             text.iter()
                 .any(|line| line.contains("OSV lookup failed") && line.contains("offline"))
@@ -2012,6 +2012,66 @@ mod tests {
             .output()
             .unwrap();
         std::fs::set_permissions(&lockfile, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{out}{err}");
+        assert!(out.contains("1 passed"), "the child ran the test: {out}");
+    }
+
+    /// The npm worker with online lookups on, through a `curl` that times
+    /// out: the view says the OSV lookup failed. Runs in a child process with
+    /// its own HOME and PATH, like the test above.
+    #[test]
+    fn the_npm_worker_says_when_the_osv_lookup_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("SWORDCHECK_WORKER_TEST").is_some() {
+            let setup = Setup {
+                save_history: false,
+                check_ids: Vec::new(),
+                config: Config::default(),
+                os_version: "macOS 26".into(),
+            };
+            let (progress, _events) = Progress::channel();
+            let outcome = work(Module::Npm, true, &setup, &progress);
+            let reported = |view: &ResultView| {
+                let text: Vec<&str> = view.headline.iter().map(|(_, line)| line.as_str()).collect();
+                text[0].ends_with("built-in list + OSV.dev (incomplete)")
+                    && text
+                        .iter()
+                        .any(|line| line.starts_with("OSV lookup failed") && line.contains("(28)"))
+            };
+            assert!(matches!(&outcome, Outcome::View(view) if reported(view)));
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("swordcheck-tui-npm-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("app/node_modules/left-pad")).unwrap();
+        std::fs::write(
+            home.join("app/node_modules/left-pad/package.json"),
+            r#"{"name":"left-pad","version":"1.3.0"}"#,
+        )
+        .unwrap();
+        let shim = home.join("shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::write(
+            shim.join("curl"),
+            "#!/bin/sh\ncat > /dev/null\necho 'curl: (28) Operation timed out' >&2\nexit 28\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(shim.join("curl"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::tests::the_npm_worker_says_when_the_osv_lookup_failed",
+                "--nocapture",
+            ])
+            .env("SWORDCHECK_WORKER_TEST", "1")
+            .env("HOME", &home)
+            .env("SWORDCHECK_HOME", home.join(".swordcheck"))
+            .env("PATH", format!("{}:/usr/bin:/bin", shim.display()))
+            .output()
+            .unwrap();
         let _ = std::fs::remove_dir_all(&home);
         let out = String::from_utf8_lossy(&output.stdout);
         let err = String::from_utf8_lossy(&output.stderr);

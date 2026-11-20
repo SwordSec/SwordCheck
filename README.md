@@ -271,7 +271,9 @@ Options:
 
 The exit code is 1 when a confirmed malicious package is found; heuristic
 script warnings do not affect it. Otherwise it is 3 when the `--online` OSV
-lookup failed, so only the built-in list was checked. If something turns up: remove the package or
+lookup failed, so the packages it did not answer for were checked against the
+built-in list only; malicious package records found before the failure are
+still reported. If something turns up: remove the package or
 move to a clean version, delete and reinstall `node_modules`, and rotate the
 npm / GitHub / cloud credentials on that machine.
 

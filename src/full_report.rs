@@ -617,7 +617,7 @@ impl FullReport {
         let scan = &self.npm;
         let source = match &self.npm_lookup {
             Some(Ok(())) => "built-in list + OSV.dev",
-            Some(Err(_)) => "built-in list only",
+            Some(Err(_)) => "built-in list + OSV.dev (incomplete)",
             None => "built-in list only (online lookups off)",
         };
         let counts = format!(
@@ -630,7 +630,9 @@ impl FullReport {
             note(
                 out,
                 Tone::Warn,
-                &format!("The OSV lookup failed, so only the built-in list was checked: {err}"),
+                &format!(
+                    "The OSV lookup failed, so the packages it did not answer for were checked against the built-in list only: {err}"
+                ),
             );
         }
         out.push_str("<div class=\"list\">\n");
@@ -1390,8 +1392,9 @@ mod tests {
             "Online lookups on: package names and versions were sent",
             "OSV lookup failed: timeout",
             "2 other Homebrew formulae",
-            "The OSV lookup failed, so only the built-in list was checked: curl: (7) Failed to connect",
-            "built-in list only</p>",
+            "The OSV lookup failed, so the packages it did not answer for were checked against the built-in list only: \
+             curl: (7) Failed to connect",
+            "built-in list + OSV.dev (incomplete)</p>",
             "1 lockfile · 1 package · 3 apps and formulae",
             "CVE-2023-7024 · CVE-2023-7024 name and 1 more",
             "<dt>CVE-2023-6345</dt>",
