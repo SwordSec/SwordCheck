@@ -463,6 +463,9 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
                 detail.push(Detail::Text(
                     "This file is tracked in git. If the repository was ever shared, treat the secret as leaked: revoke and rotate it, then untrack the file.".into(),
                 ));
+            } else if finding.git_unknown {
+                detail.push(Detail::Blank);
+                detail.push(Detail::Text(secrets::GIT_UNKNOWN_ADVICE.into()));
             }
             let copies: Vec<&secrets::Finding> = scan
                 .findings
@@ -481,7 +484,7 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
             let file = parts.join("/");
             Row {
                 tag: finding.provider.split(' ').next().unwrap_or_default().to_uppercase(),
-                tone: match (finding.git_tracked, finding.others_can_read) {
+                tone: match (finding.git_tracked, finding.others_can_read || finding.git_unknown) {
                     (true, _) => Tone::Bad,
                     (_, true) => Tone::Warn,
                     _ => Tone::Plain,
@@ -1528,6 +1531,29 @@ mod tests {
         );
         assert!(npm_view(&scan, None).headline[0].1.contains("online lookups are off"));
         assert!(npm_view(&scan, Some(Ok(()))).headline[0].1.contains("OSV.dev"));
+    }
+
+    #[test]
+    fn secrets_view_says_when_git_status_is_unknown() {
+        let dir = std::env::temp_dir().join(format!("swordcheck-tui-gitunknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "DATABASE_URL=postgres://app:Zq9K2mx7LwPa4@db.prod.internal/app\n",
+        )
+        .unwrap();
+        let mut scan = secrets::scan(&secrets::files_under(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        scan.findings[0].git_unknown = true;
+        scan.findings[0].others_can_read = false;
+        let view = secrets_view(&scan);
+        assert_eq!(view.rows[0].tone, Tone::Warn);
+        assert!(
+            view.rows[0]
+                .detail
+                .contains(&Detail::Text(secrets::GIT_UNKNOWN_ADVICE.into()))
+        );
     }
 
     #[test]

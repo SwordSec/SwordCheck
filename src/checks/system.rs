@@ -43,7 +43,17 @@ impl Check for FileVault {
         // Output: "FileVault is On." / "FileVault is Off.", possibly followed
         // by a line about encryption or decryption being in progress.
         if text.contains("FileVault is On") {
-            if text.contains("in progress") {
+            // FileVault still says "On" while it decrypts the disk, which is
+            // what turning it off does: the disk is on its way to plain text.
+            if text.contains("Decryption") {
+                Outcome::fail(
+                    format!(
+                        "FileVault is being turned off: the disk is being decrypted ({}).",
+                        one_line(&text)
+                    ),
+                    "Turn FileVault back on in System Settings > Privacy & Security > FileVault.",
+                )
+            } else if text.contains("in progress") {
                 Outcome::pass(format!("Disk encryption is enabled ({}).", one_line(&text)))
             } else {
                 Outcome::pass("Disk encryption is enabled.")
@@ -490,6 +500,19 @@ mod tests {
         let outcome = FileVault.run(&off);
         assert_eq!(outcome.status, Status::Fail);
         assert!(outcome.detail.contains("FileVault is Off"), "{}", outcome.detail);
+    }
+
+    #[test]
+    fn filevault_being_decrypted_is_not_a_pass() {
+        // Turning FileVault off decrypts the disk while `fdesetup` still says "On".
+        let decrypting = MockRunner::new().ok(
+            "fdesetup status",
+            "FileVault is On.\nDecryption in progress: Percent completed = 88",
+        );
+        let outcome = FileVault.run(&decrypting);
+        assert_eq!(outcome.status, Status::Fail);
+        assert!(outcome.detail.contains("being decrypted"), "{}", outcome.detail);
+        assert!(outcome.advice.contains("Turn FileVault back on"), "{}", outcome.advice);
     }
 
     #[test]

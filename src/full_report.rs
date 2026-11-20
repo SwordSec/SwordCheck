@@ -75,7 +75,9 @@ impl FullReport {
 
     /// Did an online lookup fail, so that something may be missing?
     pub fn incomplete(&self) -> bool {
-        !self.vulns.warnings.is_empty() || matches!(self.npm_lookup, Some(Err(_)))
+        !self.vulns.warnings.is_empty()
+            || matches!(self.npm_lookup, Some(Err(_)))
+            || self.secrets.git_unknown().next().is_some()
     }
 
     pub fn to_html(&self) -> String {
@@ -648,6 +650,17 @@ impl FullReport {
             plural(scan.findings.len(), "place", "places")
         );
         section_head(out, "secrets", "Secrets on disk", &counts, false);
+        let unknown = scan.git_unknown().count();
+        if unknown > 0 {
+            note(
+                out,
+                Tone::Warn,
+                &format!(
+                    "Git could not tell whether {} tracked, so a leaked secret may be missing from \"Fix these first\".",
+                    plural(unknown, "location is", "locations are")
+                ),
+            );
+        }
         if scan.files_skipped > 0 {
             note(
                 out,
@@ -672,7 +685,7 @@ impl FullReport {
     }
 
     fn secret_row(&self, finding: &secrets::Finding) -> Row {
-        let tone = match (finding.git_tracked, finding.others_can_read) {
+        let tone = match (finding.git_tracked, finding.others_can_read || finding.git_unknown) {
             (true, _) => Tone::Crit,
             (_, true) => Tone::Warn,
             _ => Tone::Unknown,
@@ -717,7 +730,10 @@ impl FullReport {
                 "<p class=\"advice\">This file is tracked in git. If the repository was ever shared, treat the \
                  secret as leaked: revoke and rotate it, then untrack the file.</p>",
             );
-        } else if finding.others_can_read {
+        } else if finding.git_unknown {
+            let _ = write!(body, "<p class=\"advice\">{}</p>", escape(secrets::GIT_UNKNOWN_ADVICE));
+        }
+        if finding.others_can_read && !finding.git_tracked {
             body.push_str(&command(&format!(
                 "chmod 600 {}",
                 shell_quote(&secrets::display_path(&finding.path, self.home.as_deref()))
@@ -1474,6 +1490,40 @@ mod tests {
             "the marker stays inside the scale"
         );
         assert!(scored(0, 100, None).contains("<rect x=\"0\" y=\"4\""));
+    }
+
+    #[test]
+    fn a_secret_whose_git_status_is_unknown_is_not_clean() {
+        let temp = TempDir::new("gitunknown");
+        let project = temp.0.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let value = password(9);
+        std::fs::write(
+            project.join(".env"),
+            format!("DATABASE_URL=postgres://app:{value}@db.prod.internal/app\n"),
+        )
+        .unwrap();
+        let mut report = empty(audit(vec![result("sip", Status::Pass, 20)], None));
+        report.secrets = secrets::scan(&secrets::files_under(&project));
+        assert_eq!(report.secrets.findings.len(), 1);
+        report.secrets.findings[0].git_unknown = true;
+        report.secrets.findings[0].others_can_read = false;
+
+        let html = report.to_html();
+        assert!(report.incomplete());
+        assert!(!report.found_threat());
+        assert!(html.contains(&escape(secrets::GIT_UNKNOWN_ADVICE)));
+        assert!(html.contains("Git could not tell whether 1 location is tracked"));
+        assert!(
+            html.contains("<details class=\"item warn\""),
+            "unknown is a warning, not neutral"
+        );
+        assert!(!html.contains("Nothing urgent"));
+
+        // Unknown and readable by others: both pieces of advice.
+        report.secrets.findings[0].others_can_read = true;
+        let html = report.to_html();
+        assert!(html.contains(&escape(secrets::GIT_UNKNOWN_ADVICE)) && html.contains("<pre>chmod 600 "));
     }
 
     #[test]
