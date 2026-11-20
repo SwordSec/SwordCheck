@@ -1273,7 +1273,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("macos-audit-secrets-{label}-{}", std::process::id()));
+                .join(format!("swordcheck-secrets-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             // On macOS the temporary directory lives under a symbolic link.

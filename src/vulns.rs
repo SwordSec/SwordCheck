@@ -16,7 +16,7 @@
 //! Without `--online` nothing leaves the machine and only the inventory is
 //! shown. With `--online`, package names and versions (never file paths or
 //! contents) are sent to the services above. Responses are cached under
-//! `~/.macos-audit/cache`.
+//! `~/.swordcheck/cache`.
 
 use crate::lockfiles::{self, Lockfile, Package};
 use crate::progress::Progress;
@@ -1127,15 +1127,17 @@ fn parse_epss(text: &str) -> Result<BTreeMap<String, f64>, String> {
 
 /// Asks the NVD which known-exploited CVEs affect each product version.
 /// Without an API key the NVD allows 5 requests per 30 seconds, so uncached
-/// lookups are spaced out; set `NVD_API_KEY` to go ten times faster.
+/// lookups are spaced out; set `NVD_API_KEY` (environment or `.env`) to go
+/// ten times faster.
 fn nvd_lookup(items: &mut [SystemItem], kev: &BTreeMap<String, KevEntry>, options: &Online, warnings: &mut Vec<String>) {
-    let api_key = std::env::var("NVD_API_KEY").ok().filter(|key| !key.is_empty());
+    let api_key = crate::envfile::lookup("NVD_API_KEY");
     let headers: Vec<String> = api_key.iter().map(|key| format!("apiKey: {key}")).collect();
     let pause = Duration::from_millis(if api_key.is_some() { 700 } else { 6500 });
     let cache = options.cache.join("nvd");
     let total = items.len();
     let mut requested = false;
-    options.progress.stage(format!("Checking {total} system products in the NVD"));
+    let speed = if api_key.is_some() { "with an API key" } else { "no API key: slow" };
+    options.progress.stage(format!("Checking {total} system products in the NVD ({speed})"));
 
     for (index, item) in items.iter_mut().enumerate() {
         if options.progress.cancelled() {
@@ -1514,7 +1516,7 @@ mod tests {
 
     #[test]
     fn cached_advisories_are_used_only_while_current() {
-        let cache = std::env::temp_dir().join(format!("macos-audit-osv-{}", std::process::id()));
+        let cache = std::env::temp_dir().join(format!("swordcheck-osv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cache);
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("GHSA-1.json"), r#"{"id": "GHSA-1", "summary": "cached"}"#).unwrap();
@@ -1645,7 +1647,7 @@ mod tests {
 
     #[test]
     fn cellar_is_read_without_running_brew() {
-        let cellar = std::env::temp_dir().join(format!("macos-audit-cellar-{}", std::process::id()));
+        let cellar = std::env::temp_dir().join(format!("swordcheck-cellar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cellar);
         for dir in ["curl/8.11.1_1", "openssl@3/3.4.0", "openssl@3/3.3.2", "some-private-tool/0.1.0", "empty", "curl/.metadata"] {
             std::fs::create_dir_all(cellar.join(dir)).unwrap();

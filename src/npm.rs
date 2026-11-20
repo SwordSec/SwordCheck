@@ -725,7 +725,7 @@ mod tests {
 
     impl TempDir {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("macos-audit-npm-{label}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("swordcheck-npm-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)

@@ -1,8 +1,8 @@
-//! macOS Security Auditor
+//! SwordCheck
 //!
-//! Audits local macOS security settings in a read-only way, scores them and
-//! reports the result. As a Rust learning project, every section is commented
-//! in detail.
+//! A read-only security check-up: audits local macOS security settings,
+//! scores them and reports the result, and scans for known vulnerabilities,
+//! malicious npm packages and stray API keys.
 //!
 //! Modules:
 //! - `checks`  : the `Check` trait and all checks
@@ -17,10 +17,12 @@
 //! - `secrets` : API key / secret scan (`--secrets`)
 //! - `osv`     : OSV.dev batch queries shared by `npm` and `vulns`
 //! - `net`     : HTTP through the system `curl`
+//! - `envfile` : API keys from the environment or a `.env` file
 //! - `tui`     : interactive dashboard
 
 mod checks;
 mod config;
+mod envfile;
 mod history;
 mod lockfiles;
 mod net;
@@ -48,14 +50,14 @@ use std::process::ExitCode;
 /// output from the fields and doc comments of this struct.
 #[derive(Debug, Parser)]
 #[command(
-    name = "macos-audit",
+    name = "swordcheck",
     version,
-    about = "Audits local macOS security settings read-only and scores them out of 100.",
+    about = "SwordCheck by SwordSec: a read-only security check-up. Audits macOS settings, finds known vulnerabilities, npm malware and stray API keys.",
     disable_help_flag = true,
     disable_version_flag = true,
-    override_usage = "macos-audit [OPTIONS]",
+    override_usage = "swordcheck [OPTIONS]",
     help_template = "{name} {version}\n{about}\n\nUsage: {usage}\n\nOptions:\n{options}\n{after-help}",
-    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/macos-audit/audit.toml"
+    after_help = "Exit code:\n  0  no failed checks and the score is above the threshold\n  1  at least one check failed or the score is below --min-score\n  2  usage or configuration error\n  3  an online lookup failed, so the scan is incomplete (--npm / --vulns with --online)\n\nThe tool never changes a setting: it shows what to fix and you apply it.\n\nConfiguration: ./audit.toml or ~/.config/swordcheck/audit.toml"
 )]
 struct Cli {
     /// Output format
@@ -567,7 +569,7 @@ mod tests {
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("macos-audit").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("swordcheck").chain(args.iter().copied()))
     }
 
     #[test]
