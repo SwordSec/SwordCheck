@@ -5,6 +5,7 @@
 //! stderr (command line), or sends them over a channel (dashboard), so the
 //! scan code never needs to know who is watching.
 
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -83,12 +84,16 @@ impl Progress {
     fn send(&self, event: Event) {
         match &self.sink {
             Sink::None => {}
-            Sink::Stderr => match event {
-                Event::Stage(label) => eprintln!("› {label}"),
-                Event::Note(text) => eprintln!("  {text}"),
-                // Counters would flood a scrolling terminal.
-                Event::Step { .. } => {}
-            },
+            // Progress is a courtesy: when nobody reads stderr any more
+            // (`2>&1 | head`), the scan goes on instead of panicking.
+            Sink::Stderr => {
+                let _ = match event {
+                    Event::Stage(label) => writeln!(std::io::stderr(), "› {label}"),
+                    Event::Note(text) => writeln!(std::io::stderr(), "  {text}"),
+                    // Counters would flood a scrolling terminal.
+                    Event::Step { .. } => Ok(()),
+                };
+            }
             // The receiver is gone when the user cancelled.
             Sink::Channel(sender) => {
                 if sender.send(event).is_err() {

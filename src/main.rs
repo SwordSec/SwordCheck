@@ -44,7 +44,7 @@ use colored::Colorize;
 use config::Config;
 use report::{Format, Report};
 use runner::SystemRunner;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -183,6 +183,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     // The commands used are macOS-specific. `cfg!` yields true/false at compile time.
     if !cfg!(target_os = "macos") {
         return Err("This tool only runs on macOS.".to_string());
+    }
+
+    // A file that cannot be written fails now, not after a long scan.
+    if let Some(path) = cli.report.as_ref().or(cli.output.as_ref()) {
+        check_output(path)?;
     }
 
     // The scan modes do not use the audit configuration or the check list.
@@ -365,7 +370,7 @@ fn run_report(
         home: std::env::var_os("HOME").map(PathBuf::from),
     };
     std::fs::write(path, report.to_html()).map_err(|err| format!("Could not write {}: {err}", path.display()))?;
-    eprintln!("Report written: {}", path.display());
+    written(path);
 
     let audit_failed = exit_code(cli, config, &report.audit) == ExitCode::FAILURE;
     let threat = report.found_threat();
@@ -582,10 +587,36 @@ fn emit(cli: &Cli, rendered: &str) -> Result<(), String> {
             std::fs::write(path, format!("{rendered}\n"))
                 .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
             if !cli.quiet {
-                eprintln!("Report written: {}", path.display());
+                written(path);
             }
         }
         None => println!("{rendered}"),
+    }
+    Ok(())
+}
+
+/// Says where the report went. A closed stderr (`2>&1 | head`) is not an
+/// error: the report is written and the exit code still has to be right.
+fn written(path: &Path) {
+    let _ = writeln!(std::io::stderr(), "Report written: {}", path.display());
+}
+
+/// Checks that an output file can be created where asked: its folder exists
+/// and it is not a folder itself. Permissions only show when writing.
+fn check_output(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return Err(format!("{} is a directory.", path.display()));
+    }
+    let folder = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !folder.is_dir() {
+        return Err(format!(
+            "Could not write {}: the folder {} does not exist.",
+            path.display(),
+            folder.display()
+        ));
     }
     Ok(())
 }
