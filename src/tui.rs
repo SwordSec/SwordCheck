@@ -2304,12 +2304,26 @@ mod tests {
     #[test]
     fn an_audit_is_exported_in_the_chosen_format() {
         let dir = export_dir("audit");
-        let mut app = audit_app();
+        let mut app = app();
         app.reports_dir = Some(dir.join("reports"));
-        if let Screen::Audit(view) = &mut app.screen {
-            view.timestamp = "2026-11-22T14:05:09+03:00".into();
-        }
+        let mut view = AuditView::new(
+            vec![
+                result("firewall", Status::Pass, 20),
+                result("filevault", Status::Fail, 25),
+            ],
+            None,
+        );
+        view.timestamp = "2026-11-22T14:05:09+03:00".into();
+        app.screen = Screen::Audit(view);
         assert!(render(&mut app).contains("e export"));
+
+        // Esc closes the dialog without writing; other keys do nothing.
+        app.on_key(KeyCode::Char('e'));
+        app.on_key(KeyCode::Char('x'));
+        assert!(matches!(app.export, Some(Export::Choosing { .. })));
+        app.on_key(KeyCode::Esc);
+        assert!(app.export.is_none() && !dir.exists());
+        assert!(matches!(app.screen, Screen::Audit(_)), "esc closed the dialog only");
 
         app.on_key(KeyCode::Char('e'));
         let screen = render(&mut app);
@@ -2441,6 +2455,142 @@ mod tests {
         assert!(matches!(&app.export, Some(Export::Done(Err(message))) if message.contains(crate::home::MISSING)));
         assert_eq!(app.on_key(KeyCode::Char('q')), Action::Quit);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_scan_renders_in_every_format_and_keeps_its_scan() {
+        colored::control::set_override(false);
+        let time = || "2026-11-22T14:05:09+03:00".to_string();
+        let mut vulns = ScanReport::Vulns(vulns::VulnReport::new(time(), vulns::Scan::default()));
+        assert_eq!(vulns.timestamp(), time());
+        assert!(
+            vulns
+                .render(Format::Html, "macOS 26")
+                .contains("<h1>Vulnerability scan of this Mac</h1>")
+        );
+        assert!(vulns.render(Format::Text, "macOS 26").contains("0 lockfiles"));
+        assert!(vulns.render(Format::Json, "macOS 26").contains("\"lockfiles\": 0"));
+
+        let mut secrets = ScanReport::Secrets(secrets::SecretsReport::new(time(), secrets::Scan::default()));
+        assert_eq!(secrets.timestamp(), time());
+        let html = secrets.render(Format::Html, "macOS 26");
+        assert!(
+            html.contains("<h1>Secret scan of this Mac</h1>") && html.contains("macOS 26"),
+            "{html}"
+        );
+        assert!(
+            secrets
+                .render(Format::Text, "macOS 26")
+                .contains("Secret / API Key Scan")
+        );
+        assert!(
+            secrets
+                .render(Format::Json, "macOS 26")
+                .contains("\"files_scanned\": 0")
+        );
+
+        // The npm page says whether OSV.dev was asked; the scan survives the page.
+        let scan = npm::Scan {
+            packages: 7,
+            ..npm::Scan::default()
+        };
+        let mut looked_up = ScanReport::Npm(npm::NpmReport::new(time(), true, scan));
+        assert!(
+            looked_up
+                .render(Format::Html, "macOS 26")
+                .contains("built-in list + OSV.dev")
+        );
+        let text = looked_up.render(Format::Text, "macOS 26");
+        assert!(
+            text.contains("7 package installs") && text.contains("embedded list + OSV.dev"),
+            "{text}"
+        );
+        let mut offline = ScanReport::Npm(npm::NpmReport::new(time(), false, npm::Scan::default()));
+        assert!(
+            offline
+                .render(Format::Html, "macOS 26")
+                .contains("built-in list only (online lookups off)")
+        );
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_written_is_an_error() {
+        let dir = export_dir("unwritable");
+        // A folder already has the name of the file.
+        std::fs::create_dir_all(dir.join("report.txt")).unwrap();
+        let error = write_report(&dir, "report.txt", "text").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.starts_with("Could not write"), "{error}");
+        // The home screen has no result.
+        assert_eq!(
+            app().write_export(Format::Json).unwrap_err(),
+            "There is no result to export."
+        );
+    }
+
+    #[test]
+    fn an_audit_is_not_recorded_over_a_history_that_cannot_be_read() {
+        let dir = export_dir("corrupt-history");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        std::fs::write(&path, "not json").unwrap();
+        let (trend, previous) = record_audit(
+            Some(&path),
+            &[result("firewall", Status::Pass, 20)],
+            "macOS 26",
+            "2026-11-22T14:05:09+03:00",
+        );
+        let kept = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(trend.starts_with("history unavailable: could not parse"), "{trend}");
+        assert!(previous.is_none());
+        assert_eq!(kept, "not json");
+    }
+
+    /// The secret worker keeps its scan for the export. It reads HOME, so it
+    /// runs in a child process with a HOME of its own, like the tests below.
+    #[test]
+    fn the_secret_worker_keeps_the_scan_for_the_export() {
+        if std::env::var_os("SWORDCHECK_WORKER_TEST").is_some() {
+            let setup = Setup {
+                save_history: false,
+                check_ids: Vec::new(),
+                config: Config::default(),
+                os_version: "macOS 26".into(),
+            };
+            let (progress, _events) = Progress::channel();
+            let outcome = work(Module::Secrets, false, &setup, &progress);
+            let kept = |view: &ResultView| {
+                view.rows.len() == 1
+                    && matches!(&view.report, Some(ScanReport::Secrets(report)) if report.scan.findings.len() == 1)
+            };
+            assert!(matches!(&outcome, Outcome::View(view) if kept(view)));
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("swordcheck-tui-secret-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("app")).unwrap();
+        std::fs::write(
+            home.join("app/.env"),
+            "DATABASE_URL=postgres://app:Zq9K2mx7LwPa4@db.prod.internal/app\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::tests::the_secret_worker_keeps_the_scan_for_the_export",
+                "--nocapture",
+            ])
+            .env("SWORDCHECK_WORKER_TEST", "1")
+            .env("HOME", &home)
+            .env("SWORDCHECK_HOME", home.join(".swordcheck"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{out}{err}");
+        assert!(out.contains("1 passed"), "the child ran the test: {out}");
     }
 
     #[test]
@@ -2738,13 +2888,22 @@ mod tests {
     #[test]
     fn a_real_audit_job_runs_to_completion() {
         // No checks selected: the worker still starts, reports and finishes.
-        let mut app = app();
-        app.start(Module::Audit);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while matches!(app.screen, Screen::Running(_)) && Instant::now() < deadline {
-            app.tick();
-            std::thread::sleep(Duration::from_millis(5));
+        // With the history on, a run without a score is not recorded.
+        for save_history in [false, true] {
+            let mut app = App::new(Setup {
+                save_history,
+                check_ids: Vec::new(),
+                config: Config::default(),
+                os_version: "macOS 26.6.2".into(),
+            });
+            app.start(Module::Audit);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while matches!(app.screen, Screen::Running(_)) && Instant::now() < deadline {
+                app.tick();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let recorded = save_history.then(|| "not recorded: no check could be evaluated".to_string());
+            assert!(matches!(&app.screen, Screen::Audit(view) if view.trend == recorded && view.previous.is_none()));
         }
-        assert!(matches!(app.screen, Screen::Audit(_)));
     }
 }
