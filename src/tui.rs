@@ -14,6 +14,7 @@
 use crate::checks::{self, CheckResult, Status};
 use crate::config::Config;
 use crate::progress::{Event as ProgressEvent, Progress};
+use crate::report::Format;
 use crate::runner::SystemRunner;
 use crate::score::{self, Summary};
 use crate::{history, lockfiles, npm, report, secrets, vulns};
@@ -24,7 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
@@ -102,6 +103,16 @@ impl Module {
         }
     }
 
+    /// The module's name inside the file name of an exported report.
+    fn slug(self) -> &'static str {
+        match self {
+            Module::Audit => "audit",
+            Module::Vulns => "vulns",
+            Module::Npm => "npm",
+            Module::Secrets => "secrets",
+        }
+    }
+
     /// Does the online toggle change what this module does?
     fn uses_network(self) -> bool {
         matches!(self, Module::Vulns | Module::Npm)
@@ -160,6 +171,8 @@ struct ResultView {
     list: ListState,
     /// Shown when there are no rows.
     empty: &'static str,
+    /// The scan behind the view, for the export; `None` when nothing was scanned.
+    report: Option<ScanReport>,
 }
 
 impl ResultView {
@@ -174,6 +187,7 @@ impl ResultView {
             rows,
             list,
             empty,
+            report: None,
         }
     }
 }
@@ -184,6 +198,10 @@ struct AuditView {
     list: ListState,
     /// Comparison with the previous audit, or why there is none.
     trend: Option<String>,
+    /// When the audit finished; goes into an exported report.
+    timestamp: String,
+    /// The audit this one was compared with, for the changes in an exported report.
+    previous: Option<history::RunRecord>,
 }
 
 impl AuditView {
@@ -192,7 +210,13 @@ impl AuditView {
         if !results.is_empty() {
             list.select(Some(0));
         }
-        Self { results, list, trend }
+        Self {
+            results,
+            list,
+            trend,
+            timestamp: now(),
+            previous: None,
+        }
     }
 
     fn selected(&self) -> Option<&CheckResult> {
@@ -556,8 +580,7 @@ fn secrets_view(scan: &secrets::Scan) -> ResultView {
 
 /// What a finished job hands back.
 enum Outcome {
-    /// The results and the comparison with the previous audit.
-    Audit(Vec<CheckResult>, Option<String>),
+    Audit(AuditView),
     View(ResultView),
 }
 
@@ -649,10 +672,19 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             let mut checks = checks::registry();
             checks.retain(|check| setup.check_ids.iter().any(|id| id == check.id()));
             let results = checks::run_checks_with(&checks, &runner, &setup.config, progress);
+            let timestamp = now();
             // A cancelled audit is not a result worth recording.
-            let trend = (setup.save_history && !progress.cancelled())
-                .then(|| record_audit(history::history_path().as_deref(), &results, &setup.os_version));
-            Outcome::Audit(results, trend)
+            let (trend, previous) = if setup.save_history && !progress.cancelled() {
+                let path = history::history_path();
+                let (trend, previous) = record_audit(path.as_deref(), &results, &setup.os_version, &timestamp);
+                (Some(trend), previous)
+            } else {
+                (None, None)
+            };
+            let mut view = AuditView::new(results, trend);
+            view.timestamp = timestamp;
+            view.previous = previous;
+            Outcome::Audit(view)
         }
         // These scans search the home directory: without one, nothing is scanned.
         Module::Vulns | Module::Npm | Module::Secrets if crate::home::dir().is_none() => no_home(module),
@@ -675,7 +707,9 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
                 _ => vulns::offline(&lockfiles, system),
             };
             scan.skipped = skipped;
-            Outcome::View(vulns_view(&scan))
+            let mut view = vulns_view(&scan);
+            view.report = Some(ScanReport::Vulns(vulns::VulnReport::new(now(), scan)));
+            Outcome::View(view)
         }
         Module::Npm => {
             progress.stage("Looking for node_modules directories");
@@ -683,12 +717,21 @@ fn work(module: Module, online: bool, setup: &Setup, progress: &Progress) -> Out
             let mut scan = npm::scan_with(&roots, progress);
             scan.global_dir_problem = unlocated;
             let lookup = online.then(|| scan.lookup_osv(progress));
-            Outcome::View(npm_view(&scan, lookup))
+            let looked_up = matches!(lookup, Some(Ok(())));
+            let lookup_error = lookup.as_ref().and_then(|outcome| outcome.as_ref().err().cloned());
+            let mut view = npm_view(&scan, lookup);
+            let mut report = npm::NpmReport::new(now(), looked_up, scan);
+            report.lookup_error = lookup_error;
+            view.report = Some(ScanReport::Npm(report));
+            Outcome::View(view)
         }
         Module::Secrets => {
             progress.stage("Looking for files that may hold secrets");
             let files = secrets::default_files();
-            Outcome::View(secrets_view(&secrets::scan_with(&files, progress)))
+            let scan = secrets::scan_with(&files, progress);
+            let mut view = secrets_view(&scan);
+            view.report = Some(ScanReport::Secrets(secrets::SecretsReport::new(now(), scan)));
+            Outcome::View(view)
         }
     }
 }
@@ -709,24 +752,34 @@ fn no_home(module: Module) -> Outcome {
 }
 
 /// Saves a dashboard audit to the history, like the command line does, and
-/// describes how it compares with the previous one. `path` is the history
-/// file (`history::history_path()`), `None` when HOME is not set to an absolute path.
-fn record_audit(path: Option<&Path>, results: &[CheckResult], os_version: &str) -> String {
+/// describes how it compares with the previous one; also returns that
+/// previous audit. `path` is the history file (`history::history_path()`),
+/// `None` when HOME is not set to an absolute path.
+fn record_audit(
+    path: Option<&Path>,
+    results: &[CheckResult],
+    os_version: &str,
+    timestamp: &str,
+) -> (String, Option<history::RunRecord>) {
     let Some(path) = path else {
-        return "history unavailable (HOME is not set to an absolute path)".to_string();
+        return (
+            "history unavailable (HOME is not set to an absolute path)".to_string(),
+            None,
+        );
     };
     // Like the command line: a run in which nothing could be evaluated has no
     // score worth comparing or saving.
     if score::score_if_scorable(results).is_none() {
-        return "not recorded: no check could be evaluated".to_string();
+        return ("not recorded: no check could be evaluated".to_string(), None);
     }
     let records = match history::load(path) {
         Ok(records) => records,
         // A corrupt history is left alone rather than overwritten.
-        Err(err) => return format!("history unavailable: {err}"),
+        Err(err) => return (format!("history unavailable: {err}"), None),
     };
     let score = score::calculate_score(results);
-    let trend = match records.last() {
+    let previous = records.last().cloned();
+    let trend = match &previous {
         None => "first recorded audit".to_string(),
         Some(previous) => {
             let changed = history::diff(previous, results).len();
@@ -734,12 +787,161 @@ fn record_audit(path: Option<&Path>, results: &[CheckResult], os_version: &str) 
             format!("previous {} ({delta:+}), {changed} changed", previous.score)
         }
     };
-    let timestamp = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    let record = history::RunRecord::new(timestamp, os_version.to_string(), score, results);
-    match history::append(path, records, record) {
+    let record = history::RunRecord::new(timestamp.to_string(), os_version.to_string(), score, results);
+    let trend = match history::append(path, records, record) {
         Ok(()) => trend,
         Err(err) => format!("{trend}; not saved: {err}"),
+    };
+    (trend, previous)
+}
+
+/// The current local time, as every report records it.
+fn now() -> String {
+    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
+// ---- Export ----
+
+/// The report of a finished scan, kept so that it can be written to a file.
+enum ScanReport {
+    Vulns(vulns::VulnReport),
+    Npm(npm::NpmReport),
+    Secrets(secrets::SecretsReport),
+}
+
+impl ScanReport {
+    fn timestamp(&self) -> &str {
+        match self {
+            ScanReport::Vulns(report) => &report.timestamp,
+            ScanReport::Npm(report) => &report.timestamp,
+            ScanReport::Secrets(report) => &report.timestamp,
+        }
     }
+
+    /// The scan as an HTML page: its section of the full report (`--report`).
+    fn html(&mut self, os_version: &str) -> String {
+        use crate::full_report::{FullReport, Section};
+        // Only the time and the system are read from this empty audit.
+        let audit = report::Report::new(self.timestamp().to_string(), os_version.to_string(), Vec::new(), None);
+        let mut page = FullReport {
+            audit,
+            online: false,
+            vulns: vulns::Scan::default(),
+            npm: npm::Scan::default(),
+            npm_lookup: None,
+            secrets: secrets::Scan::default(),
+            home: crate::home::dir(),
+        };
+        // The page borrows the scan for a moment; it goes back afterwards.
+        match self {
+            ScanReport::Vulns(report) => {
+                page.online = report.scan.online;
+                page.vulns = std::mem::take(&mut report.scan);
+                let html = page.scan_html(Section::Vulns);
+                report.scan = page.vulns;
+                html
+            }
+            ScanReport::Npm(report) => {
+                page.npm_lookup = match (&report.lookup_error, report.online) {
+                    (Some(error), _) => Some(Err(error.clone())),
+                    (None, true) => Some(Ok(())),
+                    (None, false) => None,
+                };
+                page.online = page.npm_lookup.is_some();
+                page.npm = std::mem::take(&mut report.scan);
+                let html = page.scan_html(Section::Npm);
+                report.scan = page.npm;
+                html
+            }
+            ScanReport::Secrets(report) => {
+                page.secrets = std::mem::take(&mut report.scan);
+                let html = page.scan_html(Section::Secrets);
+                report.scan = page.secrets;
+                html
+            }
+        }
+    }
+
+    /// The text and JSON reports of the command line, or the HTML page.
+    fn render(&mut self, format: Format, os_version: &str) -> String {
+        if format == Format::Html {
+            return self.html(os_version);
+        }
+        match (&*self, format) {
+            (ScanReport::Vulns(report), Format::Json) => report.to_json(),
+            (ScanReport::Vulns(report), _) => report.to_text(),
+            (ScanReport::Npm(report), Format::Json) => report.to_json(),
+            (ScanReport::Npm(report), _) => report.to_text(),
+            (ScanReport::Secrets(report), Format::Json) => report.to_json(),
+            (ScanReport::Secrets(report), _) => report.to_text(),
+        }
+    }
+}
+
+/// The formats offered for an audit and for a scan, in menu order.
+const AUDIT_FORMATS: [Format; 4] = [Format::Html, Format::Markdown, Format::Text, Format::Json];
+const SCAN_FORMATS: [Format; 3] = [Format::Html, Format::Text, Format::Json];
+
+/// Name, file extension and a few words about a format.
+fn format_info(format: Format) -> (&'static str, &'static str, &'static str) {
+    match format {
+        Format::Html => ("HTML", "html", "one page to open in a browser"),
+        Format::Markdown => ("Markdown", "md", "for an issue or a wiki page"),
+        Format::Text => ("Text", "txt", "the report as the command line prints it"),
+        Format::Json => ("JSON", "json", "everything, for scripts and other tools"),
+    }
+}
+
+/// The export dialog, drawn over a result screen.
+enum Export {
+    Choosing {
+        /// The module and when it ran.
+        title: String,
+        formats: &'static [Format],
+        list: ListState,
+    },
+    /// The file that was written, or why it could not be.
+    Done(Result<PathBuf, String>),
+}
+
+/// Where exported reports go: next to the history, so never into whatever
+/// folder the dashboard was started from. `None` without a home folder.
+fn reports_dir() -> Option<PathBuf> {
+    history::history_path().and_then(|path| path.parent().map(|dir| dir.join("reports")))
+}
+
+/// `swordcheck-vulns-2026-11-22-140500.json`: the module, when it ran, the format.
+fn report_file_name(module: Module, timestamp: &str, format: Format) -> String {
+    // Only the date and time of the RFC 3339 timestamp, without `:`.
+    let stamp: String = timestamp
+        .chars()
+        .take(19)
+        .filter_map(|c| match c {
+            'T' => Some('-'),
+            c if c.is_ascii_digit() || c == '-' => Some(c),
+            _ => None,
+        })
+        .collect();
+    format!("swordcheck-{}-{stamp}.{}", module.slug(), format_info(format).1)
+}
+
+/// Writes a report into `dir` (created when missing) and returns the file.
+/// A report says where secrets and unpatched software are, so only the
+/// owner can read a file created here.
+fn write_report(dir: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(dir).map_err(|err| format!("Could not create {}: {err}", dir.display()))?;
+    let path = dir.join(name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(format!("{text}\n").as_bytes()))
+        .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
+    Ok(path)
 }
 
 // ---- App state ----
@@ -759,6 +961,10 @@ struct App {
     menu: ListState,
     /// Are online lookups enabled?
     online: bool,
+    /// The export dialog, when it is open over a result screen.
+    export: Option<Export>,
+    /// Where exported reports are written (`reports_dir()`).
+    reports_dir: Option<PathBuf>,
 }
 
 /// What the event loop should do after a key press.
@@ -777,7 +983,67 @@ impl App {
             screen: Screen::Home,
             menu,
             online: false,
+            export: None,
+            reports_dir: reports_dir(),
         }
+    }
+
+    /// The formats the current screen can be exported in; none when it has
+    /// no result (or a scan that did not run).
+    fn export_formats(&self) -> &'static [Format] {
+        match &self.screen {
+            Screen::Audit(view) if !view.results.is_empty() => &AUDIT_FORMATS,
+            Screen::Results(view) if view.report.is_some() => &SCAN_FORMATS,
+            _ => &[],
+        }
+    }
+
+    /// Opens the export dialog over a result screen.
+    fn open_export(&mut self) {
+        let formats = self.export_formats();
+        let (module, timestamp) = match &self.screen {
+            Screen::Audit(view) => (Module::Audit, view.timestamp.as_str()),
+            Screen::Results(view) => (view.module, view.report.as_ref().map_or("", ScanReport::timestamp)),
+            _ => return,
+        };
+        if formats.is_empty() {
+            return;
+        }
+        let mut list = ListState::default();
+        list.select(Some(0));
+        self.export = Some(Export::Choosing {
+            title: format!("{} · {}", module.title(), report::short_time(timestamp)),
+            formats,
+            list,
+        });
+    }
+
+    /// Writes the result on screen to a file in the reports folder.
+    fn write_export(&mut self, format: Format) -> Result<PathBuf, String> {
+        // The dashboard is on a terminal, but the file must not get color codes.
+        colored::control::set_override(false);
+        let (module, timestamp, text) = match &mut self.screen {
+            Screen::Audit(view) => {
+                let report = report::Report::new(
+                    view.timestamp.clone(),
+                    self.setup.os_version.clone(),
+                    view.results.clone(),
+                    view.previous.as_ref(),
+                );
+                (Module::Audit, view.timestamp.as_str(), report.render(format, false))
+            }
+            Screen::Results(view) => {
+                let report = view.report.as_mut().ok_or("There is no result to export.")?;
+                let text = report.render(format, &self.setup.os_version);
+                (view.module, report.timestamp(), text)
+            }
+            _ => return Err("There is no result to export.".to_string()),
+        };
+        let dir = self
+            .reports_dir
+            .as_deref()
+            .ok_or_else(|| format!("There is no folder to save to: {}.", crate::home::MISSING))?;
+        write_report(dir, &report_file_name(module, timestamp, format), &text)
     }
 
     fn selected_module(&self) -> Module {
@@ -798,7 +1064,7 @@ impl App {
             // Events sent just before the thread ended are still queued.
             job.pump();
             self.screen = match outcome {
-                Ok(Outcome::Audit(results, trend)) => Screen::Audit(AuditView::new(results, trend)),
+                Ok(Outcome::Audit(view)) => Screen::Audit(view),
                 Ok(Outcome::View(view)) => Screen::Results(view),
                 Err(message) => Screen::Failed(message),
             };
@@ -816,6 +1082,31 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => Some(isize::MAX),
             _ => None,
         };
+
+        // The export dialog takes every key while it is open.
+        if let Some(export) = &mut self.export {
+            match export {
+                _ if code == KeyCode::Char('q') => return Action::Quit,
+                Export::Choosing { formats, list, .. } => match code {
+                    KeyCode::Esc | KeyCode::Backspace => self.export = None,
+                    KeyCode::Enter => {
+                        let format = formats[list.selected().unwrap_or(0).min(formats.len() - 1)];
+                        self.export = Some(Export::Done(self.write_export(format)));
+                    }
+                    _ => {
+                        if let Some(delta) = delta {
+                            move_selection(list, formats.len(), delta);
+                        }
+                    }
+                },
+                Export::Done(_) => self.export = None,
+            }
+            return Action::Continue;
+        }
+        if code == KeyCode::Char('e') {
+            self.open_export();
+            return Action::Continue;
+        }
 
         match &mut self.screen {
             Screen::Home => match code {
@@ -951,6 +1242,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<
 fn draw(frame: &mut Frame, app: &mut App) {
     let [body, footer] = Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).areas(frame.area());
 
+    let exportable = !app.export_formats().is_empty();
     let keys: &[(&str, &str)] = match &mut app.screen {
         Screen::Home => {
             draw_home(frame, body, &mut app.menu, app.online, &app.setup.os_version);
@@ -967,28 +1259,59 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
         Screen::Audit(view) => {
             draw_audit(frame, body, view, &app.setup.os_version);
-            &[
-                ("↑↓/jk", "navigate"),
-                ("r", "re-run audit"),
-                ("esc", "home"),
-                ("q", "quit"),
-            ]
+            if exportable {
+                &[
+                    ("↑↓/jk", "navigate"),
+                    ("r", "re-run audit"),
+                    ("e", "export"),
+                    ("esc", "home"),
+                    ("q", "quit"),
+                ]
+            } else {
+                &[
+                    ("↑↓/jk", "navigate"),
+                    ("r", "re-run audit"),
+                    ("esc", "home"),
+                    ("q", "quit"),
+                ]
+            }
         }
         Screen::Results(view) => {
             draw_results(frame, body, view);
-            &[
-                ("↑↓/jk", "navigate"),
-                ("PgUp/PgDn", "jump"),
-                ("r", "re-run"),
-                ("esc", "home"),
-                ("q", "quit"),
-            ]
+            if exportable {
+                &[
+                    ("↑↓/jk", "navigate"),
+                    ("PgUp/PgDn", "jump"),
+                    ("r", "re-run"),
+                    ("e", "export"),
+                    ("esc", "home"),
+                    ("q", "quit"),
+                ]
+            } else {
+                &[
+                    ("↑↓/jk", "navigate"),
+                    ("PgUp/PgDn", "jump"),
+                    ("r", "re-run"),
+                    ("esc", "home"),
+                    ("q", "quit"),
+                ]
+            }
         }
         Screen::Failed(message) => {
             let text = Paragraph::new(message.as_str()).block(Block::bordered().title(" Something went wrong "));
             frame.render_widget(text, body);
             &[("esc", "home"), ("q", "quit")]
         }
+    };
+    let keys: &[(&str, &str)] = match &mut app.export {
+        Some(export) => {
+            draw_export(frame, body, export, app.reports_dir.as_deref());
+            match export {
+                Export::Choosing { .. } => &[("↑↓", "select"), ("enter", "save"), ("esc", "cancel"), ("q", "quit")],
+                Export::Done(_) => &[("any key", "close"), ("q", "quit")],
+            }
+        }
+        None => keys,
     };
 
     let mut help = vec![Span::raw(" ")];
@@ -997,6 +1320,84 @@ fn draw(frame: &mut Frame, app: &mut App) {
         help.push(Span::raw(format!(" {action}   ")));
     }
     frame.render_widget(Paragraph::new(Line::from(help)), footer);
+}
+
+/// The export dialog: a box in the middle of the result screen.
+fn draw_export(frame: &mut Frame, area: Rect, export: &mut Export, dir: Option<&Path>) {
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let dim = Tone::Dim.style();
+    let height = match export {
+        Export::Choosing { formats, .. } => formats.len() as u16 + 7,
+        Export::Done(_) => 9,
+    };
+    let [column] = Layout::horizontal([Constraint::Max(72)]).flex(Flex::Center).areas(area);
+    let [boxed] = Layout::vertical([Constraint::Max(height)])
+        .flex(Flex::Center)
+        .areas(column);
+    frame.render_widget(Clear, boxed);
+    let block = Block::bordered().title(" Export report ");
+    let inner = block.inner(boxed).inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    frame.render_widget(block, boxed);
+
+    match export {
+        Export::Choosing { title, formats, list } => {
+            let [title_area, _, list_area, _, folder_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(formats.len() as u16),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(inner);
+            frame.render_widget(Paragraph::new(Span::styled(title.as_str(), bold)), title_area);
+            let items: Vec<ListItem> = formats
+                .iter()
+                .map(|format| {
+                    let (name, _, about) = format_info(*format);
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {name:<9}"), bold),
+                        Span::styled(format!("{about} "), dim),
+                    ]))
+                })
+                .collect();
+            let menu = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+            frame.render_stateful_widget(menu, list_area, list);
+            let folder = match dir {
+                Some(dir) => Span::styled(format!("Saves to {}", short_path(dir)), dim),
+                None => Span::styled(
+                    format!("There is no folder to save to: {}.", crate::home::MISSING),
+                    Tone::Warn.style(),
+                ),
+            };
+            frame.render_widget(Paragraph::new(folder).wrap(Wrap { trim: false }), folder_area);
+        }
+        Export::Done(outcome) => {
+            let lines = match outcome {
+                Ok(path) => vec![
+                    Line::from(Span::styled(
+                        "Report written",
+                        Tone::Good.style().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::default(),
+                    Line::from(short_path(path)),
+                    Line::default(),
+                    Line::from(Span::styled("Only your user account can read the file.", dim)),
+                ],
+                Err(message) => vec![
+                    Line::from(Span::styled(
+                        "The report was not written",
+                        Tone::Bad.style().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::default(),
+                    Line::from(message.as_str()),
+                ],
+            };
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+    }
 }
 
 fn draw_home(frame: &mut Frame, area: Rect, menu: &mut ListState, online: bool, os_version: &str) {
@@ -1894,6 +2295,167 @@ mod tests {
         assert!(screen.contains("re-run audit"));
     }
 
+    fn export_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("swordcheck-tui-export-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn an_audit_is_exported_in_the_chosen_format() {
+        let dir = export_dir("audit");
+        let mut app = audit_app();
+        app.reports_dir = Some(dir.join("reports"));
+        if let Screen::Audit(view) = &mut app.screen {
+            view.timestamp = "2026-11-22T14:05:09+03:00".into();
+        }
+        assert!(render(&mut app).contains("e export"));
+
+        app.on_key(KeyCode::Char('e'));
+        let screen = render(&mut app);
+        assert!(screen.contains("Export report"), "{screen}");
+        assert!(screen.contains("Security audit · 2026-11-22 14:05"), "{screen}");
+        for format in ["HTML", "Markdown", "Text", "JSON"] {
+            assert!(screen.contains(format), "{format}: {screen}");
+        }
+        assert!(screen.contains("Saves to") && screen.contains("enter save"), "{screen}");
+
+        // The list keys move inside the dialog, not in the list behind it.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        let path = dir.join("reports/swordcheck-audit-2026-11-22-140509.md");
+        assert!(matches!(&app.export, Some(Export::Done(Ok(written))) if *written == path));
+        let screen = render(&mut app);
+        assert!(screen.contains("Report written"), "{screen}");
+        assert!(screen.contains("any key close"), "{screen}");
+        let markdown = std::fs::read_to_string(&path).unwrap();
+        assert!(markdown.contains("filevault") && markdown.ends_with('\n'), "{markdown}");
+        assert!(matches!(&app.screen, Screen::Audit(view) if view.list.selected() == Some(0)));
+
+        // Any key closes the note; every other format is written too.
+        app.on_key(KeyCode::Enter);
+        assert!(app.export.is_none());
+        for (presses, extension) in [(0, "html"), (2, "txt"), (3, "json")] {
+            app.on_key(KeyCode::Char('e'));
+            for _ in 0..presses {
+                app.on_key(KeyCode::Down);
+            }
+            app.on_key(KeyCode::Enter);
+            app.on_key(KeyCode::Esc);
+            let file = dir.join(format!("reports/swordcheck-audit-2026-11-22-140509.{extension}"));
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains("filevault"), "{extension}");
+            assert!(!text.contains('\u{1b}'), "{extension}: no color codes in a file");
+        }
+        assert!(matches!(app.screen, Screen::Audit(_)), "esc closed the dialog only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scan_is_exported_as_html_text_or_json_and_only_its_owner_can_read_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = export_dir("scan");
+        let mut app = app();
+        app.reports_dir = Some(dir.clone());
+        let mut report = npm::NpmReport::new("2026-11-22T14:05:09+03:00".into(), false, npm::scan(&[]));
+        report.lookup_error = Some("curl: (28) timed out".into());
+        let mut view = ResultView::new(Module::Npm, Vec::new(), vec![row("MALWARE", "pkg")], "");
+        view.report = Some(ScanReport::Npm(report));
+        app.screen = Screen::Results(view);
+
+        app.on_key(KeyCode::Char('e'));
+        let screen = render(&mut app);
+        assert!(screen.contains("npm malware scan · 2026-11-22 14:05"), "{screen}");
+        assert!(
+            screen.contains("HTML") && screen.contains("Text") && screen.contains("JSON"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Markdown"), "the scans have no markdown report");
+        app.on_key(KeyCode::Enter);
+        let html = std::fs::read_to_string(dir.join("swordcheck-npm-2026-11-22-140509.html")).unwrap();
+        assert!(html.contains("<h1>npm malware scan of this Mac</h1>"), "{html}");
+        assert!(
+            html.contains("macOS 26.6.2") && html.contains("OSV.dev (incomplete)"),
+            "{html}"
+        );
+        assert!(html.contains("curl: (28) timed out"), "{html}");
+        // The scan is still there for the other formats.
+        app.on_key(KeyCode::Enter);
+        app.on_key(KeyCode::Char('e'));
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        let text = std::fs::read_to_string(dir.join("swordcheck-npm-2026-11-22-140509.txt")).unwrap();
+        assert!(text.contains("npm Malicious Package Scan"), "{text}");
+        assert!(
+            text.contains("OSV.dev (incomplete)")
+                && text.contains("OSV lookup failed, so the scan is incomplete: curl: (28) timed out"),
+            "{text}"
+        );
+
+        app.on_key(KeyCode::Enter);
+        app.on_key(KeyCode::Char('e'));
+        app.on_key(KeyCode::End);
+        app.on_key(KeyCode::Enter);
+        let path = dir.join("swordcheck-npm-2026-11-22-140509.json");
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["tool"], "swordcheck");
+        assert_eq!(json["lookup_error"], "curl: (28) timed out");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_to_export_without_a_result_and_a_failed_write_is_shown() {
+        // A scan that did not run (no home folder) has no report.
+        let mut app = app();
+        app.screen = Screen::Results(ResultView::new(
+            Module::Secrets,
+            Vec::new(),
+            Vec::new(),
+            "Nothing was scanned.",
+        ));
+        assert!(!render(&mut app).contains("export"));
+        app.on_key(KeyCode::Char('e'));
+        assert!(app.export.is_none());
+        app.screen = Screen::Home;
+        app.on_key(KeyCode::Char('e'));
+        assert!(app.export.is_none());
+
+        // The reports folder cannot be created below a file.
+        let dir = export_dir("failed");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        let mut app = audit_app();
+        app.reports_dir = Some(dir.join("file/reports"));
+        app.on_key(KeyCode::Char('e'));
+        app.on_key(KeyCode::Enter);
+        assert!(matches!(&app.export, Some(Export::Done(Err(message))) if message.starts_with("Could not create")));
+        assert!(render(&mut app).contains("The report was not written"));
+
+        // Without a home folder there is nowhere to save, and the dialog says so.
+        app.on_key(KeyCode::Esc);
+        app.reports_dir = None;
+        app.on_key(KeyCode::Char('e'));
+        assert!(render(&mut app).contains("There is no folder to save to"));
+        app.on_key(KeyCode::Enter);
+        assert!(matches!(&app.export, Some(Export::Done(Err(message))) if message.contains(crate::home::MISSING)));
+        assert_eq!(app.on_key(KeyCode::Char('q')), Action::Quit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_file_names_carry_the_module_the_time_and_the_format() {
+        assert_eq!(
+            report_file_name(Module::Vulns, "2026-11-22T14:05:09+03:00", Format::Json),
+            "swordcheck-vulns-2026-11-22-140509.json"
+        );
+        assert_eq!(
+            report_file_name(Module::Secrets, "../x", Format::Text),
+            "swordcheck-secrets-.txt",
+            "nothing but digits and dashes comes from the timestamp"
+        );
+    }
+
     #[test]
     fn empty_audit_does_not_panic() {
         let mut app = app();
@@ -1942,14 +2504,16 @@ mod tests {
         history::append(&path, Vec::new(), previous).unwrap();
 
         // Every check Unknown: no score, so nothing to compare or save.
-        let trend = record_audit(Some(&path), &[result("firewall", Status::Unknown, 20)], "macOS 26");
+        let now = "2026-11-02T09:00:00+03:00";
+        let (trend, _) = record_audit(Some(&path), &[result("firewall", Status::Unknown, 20)], "macOS 26", now);
         let unscored: Vec<u32> = history::load(&path)
             .unwrap()
             .iter()
             .map(|record| record.score)
             .collect();
         // A scored run is still saved and compared.
-        let scored_trend = record_audit(Some(&path), &[result("firewall", Status::Pass, 20)], "macOS 26");
+        let (scored_trend, compared_with) =
+            record_audit(Some(&path), &[result("firewall", Status::Pass, 20)], "macOS 26", now);
         let scored: Vec<u32> = history::load(&path)
             .unwrap()
             .iter()
@@ -1961,8 +2525,9 @@ mod tests {
         assert_eq!(unscored, [50], "the placeholder score must not reach the history");
         assert!(scored_trend.starts_with("previous 50 (+50)"), "{scored_trend}");
         assert_eq!(scored, [50, 100]);
+        assert_eq!(compared_with.map(|record| record.score), Some(50));
         assert_eq!(
-            record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26"),
+            record_audit(None, &[result("firewall", Status::Pass, 20)], "macOS 26", now).0,
             "history unavailable (HOME is not set to an absolute path)"
         );
     }

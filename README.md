@@ -383,6 +383,13 @@ is printed instead, so existing scripts keep working.
   flight finishes, and what was downloaded stays cached).
 - **Results:** findings on the left, the selected finding's details on the
   right, most urgent first.
+- **Export:** `e` on a result screen writes the result to a file: the audit
+  as HTML, Markdown, text or JSON; a scan as HTML (its section of the
+  `--report` page), text or JSON. Files go to `~/.swordcheck/reports/` (the
+  `SWORDCHECK_HOME` directory when set), named after the module and the time
+  of the run, e.g. `swordcheck-vulns-2026-11-22-140509.json`, and are
+  readable only by your user account. A scan that was stopped or did not run
+  has nothing to export.
 
 | Key | Action |
 | --- | --- |
@@ -391,6 +398,7 @@ is printed instead, so existing scripts keep working.
 | `Enter`, `1`–`4` | Run the selected module / run a module directly |
 | `o` | Turn online lookups on or off (home screen) |
 | `r` | Re-run the current module |
+| `e` | Export the result on screen to a file |
 | `Esc` | Back to the home screen (stops a running scan) |
 | `q` | Quit |
 

@@ -856,6 +856,9 @@ pub struct NpmReport {
     pub timestamp: String,
     /// Was the OSV query performed?
     pub online: bool,
+    /// Why the OSV query failed, when it was tried and did not finish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lookup_error: Option<String>,
     #[serde(flatten)]
     pub scan: Scan,
 }
@@ -867,6 +870,7 @@ impl NpmReport {
             version: env!("CARGO_PKG_VERSION"),
             timestamp,
             online,
+            lookup_error: None,
             scan,
         }
     }
@@ -879,10 +883,10 @@ impl NpmReport {
         let mut out = String::new();
         let rule = "─".repeat(78).dimmed();
         let scan = &self.scan;
-        let source = if self.online {
-            "embedded list + OSV.dev"
-        } else {
-            "embedded list (use --online for up-to-date records)"
+        let source = match (self.online, &self.lookup_error) {
+            (true, _) => "embedded list + OSV.dev",
+            (false, Some(_)) => "embedded list + OSV.dev (incomplete)",
+            (false, None) => "embedded list (use --online for up-to-date records)",
         };
 
         let _ = writeln!(out);
@@ -965,6 +969,13 @@ impl NpmReport {
         }
         if let Some(note) = scan.global_dir_note() {
             let _ = writeln!(out, "{}", note.yellow());
+        }
+        if let Some(error) = &self.lookup_error {
+            let _ = writeln!(
+                out,
+                "{}",
+                format!("OSV lookup failed, so the scan is incomplete: {}", printable(error)).yellow()
+            );
         }
         if scan.roots.is_empty() {
             let _ = writeln!(out, "{}", "No node_modules directory found to scan.".dimmed());

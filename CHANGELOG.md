@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard export:** `e` on a result screen writes the audit (HTML,
+  Markdown, text or JSON) or a scan (HTML, text or JSON) to
+  `~/.swordcheck/reports/`. An exported npm report says when the OSV lookup
+  failed (`lookup_error` in JSON).
+
 ### Fixed
 
 - `install.sh` no longer stops with "no published release yet" in the first
